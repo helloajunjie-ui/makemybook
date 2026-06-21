@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+from sqlalchemy import select, text, delete
 from collections import defaultdict
 
 from app.database import get_db
@@ -8,8 +9,13 @@ from app.models import MemoryEntity, MemoryFact
 from app.schemas.fetch import FetchRequest, FetchResponse, FetchData, EntityItem, FactItem
 from app.schemas.commit import CommitRequest
 from app.schemas.override import OverrideRequest
+from app.llm_client import extract_new_facts
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
+
+
+class RebuildMemoryRequest(BaseModel):
+    text: str
 
 
 @router.post("/fetch", response_model=FetchResponse)
@@ -137,3 +143,93 @@ async def override_fact(req: OverrideRequest, db: AsyncSession = Depends(get_db)
 
     await db.commit()
     return {"status": "ok"}
+
+
+@router.post("/{book_id}/rebuild/{chapter_number}")
+async def rebuild_chapter_memory(
+    book_id: str,
+    chapter_number: int,
+    req: RebuildMemoryRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    时间线覆写引擎：精准抹除某章旧记忆，重塑新记忆
+    当用户在时光机面板修改/重写某章后调用，防止"祖父悖论"
+    """
+    try:
+        # 💡 1. 抹除旧痕迹：删除该章节产生的所有 MemoryFact
+        await db.execute(
+            delete(MemoryFact).where(
+                MemoryFact.book_id == book_id,
+                MemoryFact.chapter_marker == chapter_number
+            )
+        )
+        await db.flush()
+
+        # 💡 2. 清理幽灵实体：删除没有任何事实关联的孤立实体
+        # 查出该书中所有实体
+        all_entities = await db.execute(
+            select(MemoryEntity).where(MemoryEntity.book_id == book_id)
+        )
+        for entity in all_entities.scalars().all():
+            fact_count = await db.execute(
+                select(MemoryFact).where(MemoryFact.entity_id == entity.id).limit(1)
+            )
+            if fact_count.first() is None:
+                await db.delete(entity)
+
+        await db.flush()
+
+        # 💡 3. 重新萃取新记忆
+        extracted_entities = await extract_new_facts(req.text)
+        if not extracted_entities:
+            await db.commit()
+            return {"status": "success", "message": "No new facts extracted."}
+
+        # 💡 4. 植入新记忆（复用 stream.py 的入库逻辑）
+        for item in extracted_entities:
+            entry_name = item.get("entry_name", "")
+            if not entry_name or len(entry_name) > 12:
+                continue
+
+            # 查找或创建实体
+            result = await db.execute(
+                select(MemoryEntity).where(
+                    MemoryEntity.book_id == book_id,
+                    MemoryEntity.entry_name == entry_name
+                )
+            )
+            entity = result.scalar_one_or_none()
+
+            if entity is None:
+                triggers = item.get("triggers", [])
+                if not isinstance(triggers, list):
+                    triggers = []
+                if entry_name not in triggers:
+                    triggers.append(entry_name)
+
+                entity = MemoryEntity(
+                    book_id=book_id,
+                    entry_name=entry_name,
+                    type=item.get("type", "其他"),
+                    triggers=triggers
+                )
+                db.add(entity)
+                await db.flush()
+
+            # 插入新的事实（标记为当前被修改的章节）
+            new_fact = MemoryFact(
+                entity_id=entity.id,
+                book_id=book_id,
+                content=item.get("content", ""),
+                chapter_marker=chapter_number
+            )
+            db.add(new_fact)
+
+        await db.commit()
+        return {"status": "success", "message": f"Chapter {chapter_number} memory rebuilt."}
+
+    except Exception as e:
+        await db.rollback()
+        return {"status": "error", "message": str(e)}

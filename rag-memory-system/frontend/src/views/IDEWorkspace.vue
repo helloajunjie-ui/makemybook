@@ -748,6 +748,17 @@ const triggerRevision = async () => {
 const acceptRevision = () => {
   if (reviseDraft.value) {
     storyStore.viewingChapter.content = reviseDraft.value
+    // 💡 时间线覆写：静默触发记忆重塑（非阻塞）
+    const chapterNum = storyStore.viewingChapter?.chapter || storyStore.currentChapter
+    const newText = reviseDraft.value
+    fetch(`/api/memory/${storyStore.currentBookId}/rebuild/${chapterNum}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...llmHeaders() },
+      body: JSON.stringify({ text: newText })
+    }).then(() => {
+      // 重塑完成后，静默刷新左侧字典面板
+      memoryStore.loadMemoryForChapter(storyStore.currentBookId, storyStore.currentChapter, '')
+    }).catch(err => console.error('记忆重塑失败', err))
   }
   reviseInstruction.value = ''
   reviseDraft.value = ''

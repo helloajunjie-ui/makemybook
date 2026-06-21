@@ -57,3 +57,16 @@ export async function getChapters(bookId) {
   const res = await fetch(`${BASE}/ui/chapters?book_id=${bookId}`)
   return res.json()
 }
+
+/**
+ * 💡 时间线覆写引擎：精准抹除某章旧记忆，重塑新记忆
+ * 当用户在时光机面板修改/重写某章后调用，防止"祖父悖论"
+ */
+export async function rebuildMemory(bookId, chapterNumber, text) {
+  const res = await fetch(`${BASE}/memory/${bookId}/rebuild/${chapterNumber}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...llmHeaders() },
+    body: JSON.stringify({ text })
+  })
+  return res.json()
+}
