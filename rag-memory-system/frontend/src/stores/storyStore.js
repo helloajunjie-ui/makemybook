@@ -260,7 +260,7 @@ export const useStoryStore = defineStore('story', {
       this.pitches = []
       try {
         const response = await fetchWithBYOK('/api/books/pitch', {
-          book_id: this.currentBookId,
+          book_id: String(this.currentBookId || ''),
           seed_text: seedText,
           is_variant: isVariant,
           target_pitch: targetPitch

@@ -91,7 +91,7 @@ async def create_book(req: CreateBookRequest, db: AsyncSession = Depends(get_db)
 
 
 class PitchRequest(BaseModel):
-    book_id: str
+    book_id: Optional[str] = None
     seed_text: str
     is_variant: bool = False
     target_pitch: Optional[dict] = None
