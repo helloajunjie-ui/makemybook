@@ -118,25 +118,49 @@ async def api_generate_pitches(req: PitchRequest, request: Request, db: AsyncSes
                 variant_of = uuid.UUID(str(req.target_pitch["id"]))
             except ValueError:
                 pass
-        pitch = StoryPitch(
-            book_id=uuid.UUID(req.book_id),
-            seed_text=req.seed_text,
-            variant_of=variant_of,
-            title=p.get("title", ""),
-            summary=p.get("summary") or p.get("title", ""),
-            tone=p.get("tone"),
-        )
-        db.add(pitch)
-        await db.flush()
-        saved.append({
-            "id": str(pitch.id),
-            "title": pitch.title,
-            "summary": pitch.summary,
-            "tone": pitch.tone,
-            "showDetails": False,
-        })
 
-    await db.commit()
+        # 🛡️ 裂变阶段可能尚无 book_id（PitchRoom 中 Book 尚未创建）
+        # 此时只返回 LLM 结果，不持久化到数据库
+        if req.book_id:
+            try:
+                pitch = StoryPitch(
+                    book_id=uuid.UUID(req.book_id),
+                    seed_text=req.seed_text,
+                    variant_of=variant_of,
+                    title=p.get("title", ""),
+                    summary=p.get("summary") or p.get("title", ""),
+                    tone=p.get("tone"),
+                )
+                db.add(pitch)
+                await db.flush()
+                saved.append({
+                    "id": str(pitch.id),
+                    "title": pitch.title,
+                    "summary": pitch.summary,
+                    "tone": pitch.tone,
+                    "showDetails": False,
+                })
+            except Exception:
+                # 持久化失败时降级：只返回 LLM 结果，不阻塞裂变流程
+                saved.append({
+                    "id": "",
+                    "title": p.get("title", ""),
+                    "summary": p.get("summary") or p.get("title", ""),
+                    "tone": p.get("tone"),
+                    "showDetails": False,
+                })
+        else:
+            # 无 book_id：纯 LLM 裂变，不写数据库
+            saved.append({
+                "id": "",
+                "title": p.get("title", ""),
+                "summary": p.get("summary") or p.get("title", ""),
+                "tone": p.get("tone"),
+                "showDetails": False,
+            })
+
+    if req.book_id:
+        await db.commit()
     return {"status": "success", "data": saved}
 
 
