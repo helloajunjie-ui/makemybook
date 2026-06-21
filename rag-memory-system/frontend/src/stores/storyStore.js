@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { useMemoryStore } from './memoryStore'
 import { useSettingsStore } from './settingsStore'
 
 function friendlyFetchError(err) {
@@ -54,7 +55,9 @@ export const useStoryStore = defineStore('story', {
     currentDraft: '',
     isGeneratingOutline: false,
     chapters: [],
-    viewingChapter: null
+    viewingChapter: null,
+    // 💡 从本地存储读取文风约束，实现跨会话记忆
+    customPrompt: localStorage.getItem('qingyu_custom_prompt') || ''
   }),
 
   getters: {
@@ -67,6 +70,24 @@ export const useStoryStore = defineStore('story', {
   actions: {
     setPhase(phase) {
       this.currentPhase = phase
+      // 💡 核心修复：一旦返回大厅，彻底清空工作台残影，防止数据串库
+      if (phase === 'library') {
+        this.currentBookId = null
+        this.currentPitchId = null
+        this.chapters = []
+        this.chatHistory = []
+        this.outlineNodes = []
+        this.currentChapter = 1
+        this.currentVolume = 1
+        this.currentDraft = ''
+        this.plotSuggestions = []
+        this.isSuggesting = false
+        this.viewingChapter = null
+        // 同步清空记忆皮层
+        const memoryStore = useMemoryStore()
+        memoryStore.resetMemory()
+        this.loadBookshelf()
+      }
     },
 
     async loadBookshelf() {
@@ -88,6 +109,9 @@ export const useStoryStore = defineStore('story', {
     },
 
     async openBook(bookId, bookTitle) {
+      // 打开新书前重置记忆，避免旧数据残留
+      const memoryStore = useMemoryStore()
+      memoryStore.resetMemory()
       this.currentBookId = bookId
       try {
         const pitchRes = await fetch('/api/pitch/list')
@@ -105,6 +129,10 @@ export const useStoryStore = defineStore('story', {
       await this.loadOutlineFromDb()
       await this.loadChaptersFromDb()
       await this.loadChatHistoryFromDb()
+      // 💡 核心修复：打开存档时同步加载世界书词条（全量）
+      // 传入空 draftText 使后端返回本书所有实体
+      // 必须 await，确保在 setPhase 触发组件挂载前数据已就绪
+      await memoryStore.loadMemoryForChapter(bookId, this.currentChapter, '')
       this.setPhase('ide')
     },
 
@@ -141,7 +169,15 @@ export const useStoryStore = defineStore('story', {
         if (res.ok) {
           const chapters = await res.json()
           if (chapters && chapters.length > 0) {
-            this.chapters = chapters
+            // 标准化字段：API 返回 volume_number，前端用 volume
+            this.chapters = chapters.map(c => ({
+              id: c.id,
+              volume: c.volume_number,
+              chapter: c.chapter_marker,
+              title: c.title,
+              content: c.content,
+              created_at: c.created_at
+            }))
             const last = chapters[chapters.length - 1]
             this.currentChapter = last.chapter_marker + 1
             this.currentVolume = last.volume_number
@@ -168,7 +204,24 @@ export const useStoryStore = defineStore('story', {
     },
 
     async startNewBook() {
+      // 完全重置所有状态，避免数据库清空后前端内存残留
+      const memoryStore = useMemoryStore()
+      memoryStore.resetMemory()
       this.currentBookId = null
+      this.currentPitchId = null
+      this.promptSeed = ''
+      this.pitches = []
+      this.selectedPitch = null
+      this.currentChapter = 1
+      this.currentVolume = 1
+      this.outlineNodes = []
+      this.chatHistory = []
+      this.plotSuggestions = []
+      this.isSuggesting = false
+      this.currentDraft = ''
+      this.isGeneratingOutline = false
+      this.chapters = []
+      this.viewingChapter = null
       this.setPhase('pitch')
     },
 
@@ -209,6 +262,27 @@ export const useStoryStore = defineStore('story', {
           sort_order: n.sort_order,
         }))
         this.setPhase('outline')
+
+        // 💡 大纲生成成功后，自动创建 Book 记录，确保 currentBookId 是真实的 book_id
+        // 而不是 pitch_id（pitch_id 在 story_pitches 表，book_id 在 books 表，外键约束不同）
+        try {
+          const bookRes = await fetch('/api/books/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: this.selectedPitch?.title || '未命名世界',
+              summary: this.selectedPitch?.summary || ''
+            })
+          })
+          if (bookRes.ok) {
+            const book = await bookRes.json()
+            this.currentBookId = book.id
+          } else {
+            console.warn('创建 Book 失败，currentBookId 将保持 null')
+          }
+        } catch (bookErr) {
+          console.warn('创建 Book 网络异常:', bookErr)
+        }
       } catch (error) {
         console.error("大纲生成失败", error)
         alert("大纲生成失败: " + error.message)
@@ -248,8 +322,15 @@ export const useStoryStore = defineStore('story', {
       }
     },
 
-    useSuggestion(suggestionText) {
-      this.currentDraft = suggestionText
+    useSuggestion(suggestion) {
+      // 智能拆包：对象 → 拼接成优质指令；字符串 → 直接使用
+      if (typeof suggestion === 'object' && suggestion !== null) {
+        const title = suggestion.title || ''
+        const desc = suggestion.desc || suggestion.conflict || ''
+        this.currentDraft = `【剧情分支】${title}：${desc}`.trim()
+      } else {
+        this.currentDraft = String(suggestion)
+      }
     },
 
     advanceVolume() {
@@ -347,6 +428,16 @@ export const useStoryStore = defineStore('story', {
 
     closeChapterModal() {
       this.viewingChapter = null
+    },
+
+    // 💡 更新并持久化作者自定义文风约束
+    updateCustomPrompt(text) {
+      this.customPrompt = text
+      try {
+        localStorage.setItem('qingyu_custom_prompt', text)
+      } catch {
+        // 隐私模式等场景静默失败
+      }
     }
   }
 })

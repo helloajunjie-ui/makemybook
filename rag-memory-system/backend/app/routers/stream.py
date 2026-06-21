@@ -24,6 +24,7 @@ class StreamGenRequest(BaseModel):
     chapter_marker: int
     plot_context: str
     extracted_triggers: List[str]
+    custom_prompt: str = ""  # 💡 接收用户的自定义文风规则
 
 
 @router.post("/generate")
@@ -42,14 +43,18 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
             fetch_req = FetchRequest(book_id=req.book_id, current_chapter=req.chapter_marker, extracted_triggers=req.extracted_triggers)
             fetch_res = await predict_fetch_memory(fetch_req, db)
 
-            found = [e['entry_name'] for e in fetch_res["data"]["found_entries"]]
-            missing = fetch_res["data"]["missing_entries"]
+            found = [e.entry_name for e in fetch_res.data.found_entries]
+            missing = fetch_res.data.missing_entries
 
             yield f"data: {json.dumps({'type': 'status', 'msg': f'命中设定: {len(found)}个 | 允许新造物: {len(missing)}个', 'found': found, 'missing': missing})}\n\n"
 
             # Phase 3: Inject 组装法则
             yield f"data: {json.dumps({'type': 'status', 'msg': '🧱 组装上帝视角法则...', 'step': 'inject'})}\n\n"
-            system_prompt = build_injection_prompt(req.chapter_marker, fetch_res["data"], req.plot_context)
+            system_prompt = build_injection_prompt(req.chapter_marker, fetch_res.data, req.plot_context)
+
+            # 💡 作者自定义文风约束熔接（最高优先级，必须严格遵守）
+            if req.custom_prompt and req.custom_prompt.strip():
+                system_prompt += f"\n\n【⚠️ 作者自定义文风与全局约束（最高优先级，必须严格遵守）】：\n{req.custom_prompt.strip()}"
 
             # Phase 4: Generate (LLM 核心流式推演)
             yield f"data: {json.dumps({'type': 'status', 'msg': '✍️ 引擎推演中...', 'step': 'generate'})}\n\n"
@@ -72,11 +77,30 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
             affected_entity_ids = set()
             try:
                 for item in extracted_entities:
-                    entry_name = item.get("entry_name")
+                    entry_name = item.get("entry_name", "")
                     entity_type = item.get("type", "其他")
-                    content = item.get("content")
+                    content = item.get("content", "")
+
+                    # 💡 世界书特有：关联词条熔接 — 不改表结构，拼入 content
+                    relations = item.get("relations", [])
+                    if isinstance(relations, list) and len(relations) > 0:
+                        relations_str = " | ".join(relations)
+                        content = f"{content}\n\n[关联]: {relations_str}"
+
                     if not entry_name or not content:
                         continue
+                    # 💡 【核心防御闸门】：词条名超过 12 字 → AI 幻觉，丢弃
+                    if len(entry_name) > 12:
+                        print(f"[风控拦截] AI生成了恶意的超长词条名，已丢弃: {entry_name}")
+                        continue
+
+                    # 💡 获取大模型提炼的激活词，并进行安全兜底
+                    triggers = item.get("triggers", [])
+                    if not isinstance(triggers, list):
+                        triggers = []
+                    # 确保主词条名永远在激活词列表中，保证 100% 召回
+                    if entry_name and entry_name not in triggers:
+                        triggers.append(entry_name)
 
                     result = await db.execute(
                         select(MemoryEntity).where(
@@ -91,10 +115,15 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                             book_id=req.book_id,
                             entry_name=entry_name,
                             type=entity_type,
-                            triggers=[entry_name]
+                            triggers=triggers
                         )
                         db.add(entity)
                         await db.flush()
+                    else:
+                        # 💡 实体已存在，追加新的激活词（去重合并）
+                        existing_triggers = set(entity.triggers or [])
+                        new_triggers = existing_triggers.union(set(triggers))
+                        entity.triggers = list(new_triggers)
 
                     fact = MemoryFact(
                         entity_id=entity.id,
@@ -109,7 +138,8 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                     committed_results.append({
                         "entry_name": entry_name,
                         "type": entity_type,
-                        "content": content
+                        "content": content,
+                        "triggers": triggers
                     })
 
                 # 唯一一次 commit，保证原子性
@@ -199,17 +229,28 @@ async def stream_revision(
                         select(MemoryEntity.id).where(MemoryEntity.book_id == req.book_id)
                     ),
                     MemoryFact.chapter_marker == req.chapter_marker
-                ).values(is_active=False)
+                ).values(is_active=0)
                 await db.execute(stmt)
 
                 extracted_entities = await extract_new_facts(full_new_text, api_key, base_url, model_name)
 
                 affected_entity_ids = set()
                 for item in extracted_entities:
-                    entry_name = item.get("entry_name")
-                    content = item.get("content")
+                    entry_name = item.get("entry_name", "")
+                    content = item.get("content", "")
                     if not entry_name or not content:
                         continue
+                    # 💡 【核心防御闸门】：词条名超过 12 字 → AI 幻觉，丢弃
+                    if len(entry_name) > 12:
+                        print(f"[风控拦截] AI生成了恶意的超长词条名，已丢弃: {entry_name}")
+                        continue
+
+                    # 💡 获取大模型提炼的激活词，并进行安全兜底
+                    triggers = item.get("triggers", [])
+                    if not isinstance(triggers, list):
+                        triggers = []
+                    if entry_name and entry_name not in triggers:
+                        triggers.append(entry_name)
 
                     result = await db.execute(
                         select(MemoryEntity).where(
@@ -224,16 +265,20 @@ async def stream_revision(
                             book_id=req.book_id,
                             entry_name=entry_name,
                             type=item.get("type", "其他"),
-                            triggers=[entry_name]
+                            triggers=triggers
                         )
                         db.add(entity)
                         await db.flush()
+                    else:
+                        existing_triggers = set(entity.triggers or [])
+                        new_triggers = existing_triggers.union(set(triggers))
+                        entity.triggers = list(new_triggers)
 
                     new_fact = MemoryFact(
                         entity_id=entity.id,
                         chapter_marker=req.chapter_marker,
                         content=content,
-                        is_active=True
+                        is_active=1
                     )
                     db.add(new_fact)
                     affected_entity_ids.add(str(entity.id))
