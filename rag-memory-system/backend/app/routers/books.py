@@ -1,4 +1,6 @@
 from typing import Optional
+from app.models.chapter import StoryChapter
+from app.models.chat import StoryChatMessage
 from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -161,6 +163,10 @@ async def delete_book(book_id: str, db: AsyncSession = Depends(get_db)):
         await db.execute(delete(MemoryFact).where(MemoryFact.entity_id == eid))
     # 删除关联的 entity
     await db.execute(delete(MemoryEntity).where(MemoryEntity.book_id == book_id))
+    # 删除关联的章节内容
+    await db.execute(delete(StoryChapter).where(StoryChapter.book_id == book_id))
+    # 删除关联的对话历史
+    await db.execute(delete(StoryChatMessage).where(StoryChatMessage.book_id == book_id))
     # 删除 book
     await db.execute(delete(Book).where(Book.id == book_id))
     await db.commit()

@@ -196,7 +196,18 @@ export const useStoryStore = defineStore('story', {
         const response = await fetchWithBYOK('/api/books/outline', {
           pitch: this.selectedPitch
         })
-        this.outlineNodes = response.data.outline_nodes
+        this.outlineNodes = (response.data.outline_nodes || []).map(n => ({
+          id: n.id,
+          volume: n.volume_number,
+          title: n.title,
+          desc: n.core_goal || '',
+          core_goal: n.core_goal,
+          emotion_curve: n.emotion_curve,
+          location: n.location,
+          estimated_chapters: n.estimated_chapters,
+          status: n.status || 'pending',
+          sort_order: n.sort_order,
+        }))
         this.setPhase('outline')
       } catch (error) {
         console.error("大纲生成失败", error)

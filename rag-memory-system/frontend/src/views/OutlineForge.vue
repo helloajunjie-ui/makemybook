@@ -55,7 +55,7 @@ async function enterIDE() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: storyStore.selectedPitch?.title || '未命名世界',
-          summary: storyStore.selectedPitch?.desc || ''
+          summary: storyStore.selectedPitch?.summary || ''
         })
       })
       if (!res.ok) {
