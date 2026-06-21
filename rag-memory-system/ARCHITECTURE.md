@@ -1,6 +1,6 @@
 # 核心架构蓝图：基于事件溯源的小说创作记忆外挂系统
 
-**版本**: 3.4 | **架构师**: 青羽 | **定位**: 独立外挂认知中间件
+**版本**: 3.5 | **架构师**: 青羽 | **定位**: 独立外挂认知中间件
 
 ---
 
@@ -43,6 +43,8 @@ Phase 5: 记忆沉淀归档 (Commit)
   └─ 利用 Markdown 剥离法（temperature=0.3）扫描新生成的正文，提取出新产生的事实碎片
   └─ 调用外挂的 /commit 接口，打上时间戳存入数据库
   └─ 后台触发 Memory GC：若实体事实超过 10 条，异步调用 LLM 炼化压缩
+
+**提取增强**（[`llm_client.py`](backend/app/llm_client.py:68)）：`extract_new_facts()` 要求 LLM 输出 `{"entities": [...]}` 包裹的 JSON，而非裸数组。`extract_json_from_markdown()` 使用 `re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)` 提取代码块后，再尝试 `json.loads()` 解析。若顶层是 `{"entities": [...]}` 则解一层，若直接是 `[...]` 也兼容。双重防御：任何解析失败返回空列表，绝不崩溃。
 ```
 
 ---
@@ -258,6 +260,11 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 - 点击 ✨ 触发 `fetchPlotSuggestions()` → 骨架屏加载 → 卡片渲染
 - 点击卡片自动填入输入框（`useSuggestion()`），作者可微调后发送
 
+**智能拆包**（[`storyStore.js`](frontend/src/stores/storyStore.js:323)）：后端返回的 suggest 可能是 `{title, desc, conflict}` 对象而非纯字符串。`useSuggestion()` 自动检测类型：
+- 对象 → 拼接为 `【剧情分支】{title}：{desc}` 优质指令
+- 字符串 → `String()` 强制转换后直接填入
+- 彻底杜绝 `[object Object]` 显示在输入框
+
 ### 5.6 书架管理 `GET/POST/DELETE /api/books/`
 
 | 方法 | 路径 | 用途 |
@@ -339,6 +346,8 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 - 调用 `generate_outline_from_llm()`（temperature=0.8）
 - 若返回空 `outline_nodes`，抛出 `HTTPException(502)` 携带中文错误描述
 
+**前端自动建书**（[`storyStore.js`](frontend/src/stores/storyStore.js:242)）：`generateOutline()` 成功后自动创建 Book 记录，将 `pitchId` 与 `bookId` 解耦。流程：`POST /api/books/outline` → 拿到大纲 → `POST /api/books/` 创建 Book → `setPhase('ide')`。彻底杜绝 `ForeignKeyViolationError`（此前因 `currentBookId = pitchId` 导致 memory 表外键指向不存在的 Book）。
+
 ### 5.9 时光溯源重塑 `POST /api/stream/revise`
 
 **用途**：带上下文的章节重写与记忆重塑，支持指定改写范围
@@ -393,6 +402,27 @@ CREATE INDEX idx_fact_embedding ON memory_facts USING ivfflat (embedding vector_
 ---
 
 ## 7. UI/UX 设计
+
+### 词条气泡：150ms 滞空时间法则（Grace Period）
+
+词条气泡使用 `<Teleport to="body">` + `position: fixed` 渲染，彻底规避 `overflow-y-auto` 裁剪问题。但 Teleport 将气泡移出胶囊的 DOM 层级后，鼠标离开胶囊到进入气泡之间存在**物理缝隙**，直接销毁气泡会导致 Race Condition。
+
+**解决方案**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue:412)）：不铺隐形桥，而是用**时间差**。
+
+```
+胶囊 @mouseleave → setTimeout(150ms) → 销毁气泡
+气泡 @mouseenter → clearTimeout() → 取消销毁
+```
+
+核心三函数：
+
+| 函数 | 触发时机 | 行为 |
+|------|----------|------|
+| `showTooltip(event, entry)` | 胶囊 `@mouseenter` | 取消任何待销毁定时器，计算气泡位置（右侧优先，空间不足翻左侧，垂直居中不越界） |
+| `hideTooltip()` | 胶囊/气泡 `@mouseleave` | 设置 150ms 定时器，到期后销毁气泡 |
+| `keepTooltipAlive()` | 气泡 `@mouseenter` | 取消销毁定时器，气泡保持存活 |
+
+**智能定位**：`getBoundingClientRect()` 获取胶囊坐标，默认右侧 12px 间隙；右侧超出视口则翻转到左侧；垂直居中，上下边界各保留 8px 安全距离。箭头通过 `arrowRotation`（-45deg / 135deg）指示方向。
 
 ### 四阶段漏斗收敛（Funnel Convergence）
 
@@ -541,11 +571,11 @@ rag-memory-system/
         │   ├── TheLibrary.vue   # Phase 0：书架大厅（网格卡片 + 新建/选书 + ⚙️ 引擎配置）
         │   ├── PitchRoom.vue    # Phase 1：灵感裂变室（Midjourney 风格 U/V 网格）
         │   ├── OutlineForge.vue # Phase 2：大纲锻造炉（可编辑时间线）
-        │   └── IDEWorkspace.vue # Phase 3：三栏式 IDE 骨架 + SSE 流式接入 + ⚙️ 偏好设定
+        │   └── IDEWorkspace.vue # Phase 3：三栏式 IDE 骨架 + SSE 流式接入 + ⚙️ 偏好设定 + 词条气泡 150ms 滞空
         └── components/
             ├── MemoryExplorer.vue   # 记忆资源管理器
-            ├── EditorPanel.vue      # 编辑器面板
-            ├── OutlineNavigator.vue # 大纲导航
+            ├── EditorPanel.vue      # 编辑器面板（打字机渲染 + 对话历史 + 幽灵卡片 + 输入框）
+            ├── OutlineNavigator.vue # 大纲导航（卷/章节点树 + 状态标记）
             ├── MemoryPanel.vue      # 右侧"当前激活记忆"面板（含骨架屏）
             ├── TimeSlider.vue       # 时空穿梭滑块（300ms 防抖）
             ├── FactTooltip.vue      # 悬停弹出事实气泡（Teleport + 动效）
