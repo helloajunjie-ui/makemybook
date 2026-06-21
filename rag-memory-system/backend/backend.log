@@ -1,0 +1,31 @@
+INFO:     Will watch for changes in these directories: ['f:\\新建文件夹\\RAG\\rag-memory-system\\backend']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [13700] using WatchFiles
+INFO:     Started server process [20632]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'check_tables.py'. Reloading...
+INFO:     127.0.0.1:53442 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53845 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53901 - "POST /api/settings/save HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "POST /api/books/outline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53932 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53954 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53987 - "GET /api/settings/load HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53986 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53998 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54042 - "POST /api/books/outline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54249 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54269 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54270 - "GET /api/settings/load HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54834 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55104 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55105 - "GET /api/settings/load HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55112 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55366 - "GET /api/books/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55367 - "GET /api/settings/load HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55676 - "POST /api/books/pitch HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55743 - "POST /api/books/outline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55754 - "POST /api/books/outline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55786 - "POST /api/books/outline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55778 - "POST /api/books/outline HTTP/1.1" 200 OK
