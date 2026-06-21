@@ -11,4 +11,6 @@ class Book(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String(100), nullable=False, index=True)
     summary = Column(Text, default="")
+    # 💡 书籍专属文风约束（领域数据，持久化到 PostgreSQL）
+    custom_prompt = Column(Text, nullable=True, default="")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

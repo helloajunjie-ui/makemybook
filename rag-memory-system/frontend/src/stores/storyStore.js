@@ -129,6 +129,8 @@ export const useStoryStore = defineStore('story', {
       await this.loadOutlineFromDb()
       await this.loadChaptersFromDb()
       await this.loadChatHistoryFromDb()
+      // 💡 从数据库加载本书的文风约束
+      await this.loadBookDetails(bookId)
       // 💡 核心修复：打开存档时同步加载世界书词条（全量）
       // 传入空 draftText 使后端返回本书所有实体
       // 必须 await，确保在 setPhase 触发组件挂载前数据已就绪
@@ -428,6 +430,35 @@ export const useStoryStore = defineStore('story', {
 
     closeChapterModal() {
       this.viewingChapter = null
+    },
+
+    // 💡 从数据库加载本书的文风约束
+    async loadBookDetails(bookId) {
+      if (!bookId) return
+      try {
+        const res = await fetch(`/api/books/${bookId}`)
+        if (res.ok) {
+          const data = await res.json()
+          this.customPrompt = data.custom_prompt || ''
+        }
+      } catch {
+        // 静默
+      }
+    },
+
+    // 💡 持久化文风约束到 PostgreSQL
+    async saveCustomPrompt(promptText) {
+      this.customPrompt = promptText
+      if (!this.currentBookId) return
+      try {
+        await fetch(`/api/books/${this.currentBookId}/custom_prompt`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ custom_prompt: promptText })
+        })
+      } catch (e) {
+        console.error('文风设定保存失败:', e)
+      }
     }
   }
 })

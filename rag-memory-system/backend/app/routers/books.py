@@ -26,8 +26,49 @@ async def list_books(db: AsyncSession = Depends(get_db)):
         "id": str(b.id),
         "title": b.title,
         "summary": b.summary,
+        "custom_prompt": b.custom_prompt or "",
         "created_at": b.created_at.isoformat() if b.created_at else None
     } for b in books]
+
+
+@router.get("/{book_id}")
+async def get_book(book_id: str, db: AsyncSession = Depends(get_db)):
+    """获取单本书详情（含文风约束）"""
+    try:
+        bid = uuid.UUID(book_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid book ID")
+    result = await db.execute(select(Book).where(Book.id == bid))
+    book = result.scalar_one_or_none()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    return {
+        "id": str(book.id),
+        "title": book.title,
+        "summary": book.summary,
+        "custom_prompt": book.custom_prompt or "",
+        "created_at": book.created_at.isoformat() if book.created_at else None
+    }
+
+
+class CustomPromptUpdate(BaseModel):
+    custom_prompt: str = ""
+
+
+@router.put("/{book_id}/custom_prompt")
+async def update_custom_prompt(book_id: str, req: CustomPromptUpdate, db: AsyncSession = Depends(get_db)):
+    """💡 持久化书籍专属文风约束到 PostgreSQL"""
+    try:
+        bid = uuid.UUID(book_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid book ID")
+    result = await db.execute(select(Book).where(Book.id == bid))
+    book = result.scalar_one_or_none()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    book.custom_prompt = req.custom_prompt
+    await db.commit()
+    return {"status": "success", "custom_prompt": book.custom_prompt}
 
 
 class CreateBookRequest(BaseModel):
