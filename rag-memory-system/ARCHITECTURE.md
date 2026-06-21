@@ -1,6 +1,6 @@
 # 核心架构蓝图：基于事件溯源的小说创作记忆外挂系统
 
-**版本**: 3.5 | **架构师**: 青羽 | **定位**: 独立外挂认知中间件
+**版本**: 4.0 | **架构师**: 青羽 | **定位**: 独立外挂认知中间件
 
 ---
 
@@ -179,7 +179,47 @@ Phase 5: 记忆沉淀归档 (Commit)
 
 **行为**：直接修改指定 fact 的 content 或标记 is_active=0 软删除。
 
-### 5.4 SSE 流式生成 `POST /api/stream/generate`
+### 5.4 时间线覆写 `POST /api/memory/{book_id}/rebuild/{chapter_number}`
+
+**用途**：当用户修改/重写某章内容后，抹除该章旧记忆并重新萃取新事实，防止"祖父悖论"（Grandfather Paradox）——AI 在后续章节中复活已死的角色。
+
+**Request**:
+```json
+{
+  "text": "修改后的章节全文..."
+}
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "message": "Chapter 5 memory rebuilt."
+}
+```
+
+**执行流程**（[`memory.py`](backend/app/routers/memory.py:148)）：
+
+```
+1. DELETE MemoryFact WHERE book_id=? AND chapter_marker=?  — 抹除该章所有旧事实
+2. db.flush()
+3. 遍历该 book 下所有 MemoryEntity，检查是否还有剩余事实
+   └─ 无剩余事实 → db.delete(entity)  — 清理幽灵实体
+4. db.flush()
+5. extract_new_facts(req.text)  — 重新萃取新事实（LLM temperature=0.3）
+6. 对每个萃取结果：
+   └─ find-or-create MemoryEntity(book_id, entry_name)
+   └─ INSERT MemoryFact(entity_id, book_id, content, chapter_marker)
+7. db.commit()
+```
+
+**防御性设计**：
+- 全操作包裹在 `try/except` 中，任何异常触发 `db.rollback()`，绝不产生脏数据
+- 实体名超过 12 字符自动跳过（防 LLM 幻觉产生超长垃圾词条）
+- 萃取结果为空时仍正常 commit，返回 `"No new facts extracted."`
+- 非阻塞触发（前端 `fetch()` 无 `await`），不阻塞 UI
+
+### 5.5 SSE 流式生成 `POST /api/stream/generate`
 
 **用途**：五步闭环的流式推演接口，基于 SSE 协议，后端使用真实 AsyncOpenAI 客户端
 
@@ -265,7 +305,40 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 - 字符串 → `String()` 强制转换后直接填入
 - 彻底杜绝 `[object Object]` 显示在输入框
 
-### 5.6 书架管理 `GET/POST/DELETE /api/books/`
+### 5.6 命运幽灵卡片 `POST /api/stream/suggest`
+
+**用途**：极速推演接口，根据近期上下文给出 3 个差异化剧情走向建议
+
+**Request**:
+```json
+{
+  "recent_context": "张三冷笑一声，拔出了那把断剑..."
+}
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "data": ["遭遇血魔宗突袭", "发现剑中的神秘剑灵", "李四突然叛变"]
+}
+```
+
+**后端逻辑**（[`llm_client.py`](backend/app/llm_client.py:153)）：
+- `suggest_plot_directions(recent_context)` — temperature=0.8，Markdown 剥离法
+- 每个方向不超过 30 字，必须差异化（遇袭 / 发现线索 / 情感爆发）
+
+**前端交互**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue)）：
+- 输入框上方悬浮 ✨ 按钮 + 3 张幽灵卡片
+- 点击 ✨ 触发 `fetchPlotSuggestions()` → 骨架屏加载 → 卡片渲染
+- 点击卡片自动填入输入框（`useSuggestion()`），作者可微调后发送
+
+**智能拆包**（[`storyStore.js`](frontend/src/stores/storyStore.js:323)）：后端返回的 suggest 可能是 `{title, desc, conflict}` 对象而非纯字符串。`useSuggestion()` 自动检测类型：
+- 对象 → 拼接为 `【剧情分支】{title}：{desc}` 优质指令
+- 字符串 → `String()` 强制转换后直接填入
+- 彻底杜绝 `[object Object]` 显示在输入框
+
+### 5.7 书架管理 `GET/POST/DELETE /api/books/`
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
@@ -286,7 +359,7 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 - 点击弹出 `confirm()` 对话框确认删除
 - 删除成功后 `storyStore.deleteBook()` 从 `bookshelf` 数组中移除该卡片
 
-### 5.7 灵感裂变 `POST /api/books/pitch`
+### 5.8 灵感裂变 `POST /api/books/pitch`
 
 **用途**：根据种子文本裂变 3 个差异化灵感变体
 
@@ -316,7 +389,7 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 - 调用 `generate_pitches_from_llm()`（temperature=0.8）
 - 若返回空列表，抛出 `HTTPException(502)` 携带中文错误描述
 
-### 5.8 大纲生成 `POST /api/books/outline`
+### 5.9 大纲生成 `POST /api/books/outline`
 
 **用途**：根据选定的灵感裂变结果生成完整大纲骨架
 
@@ -348,7 +421,7 @@ Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（t
 
 **前端自动建书**（[`storyStore.js`](frontend/src/stores/storyStore.js:242)）：`generateOutline()` 成功后自动创建 Book 记录，将 `pitchId` 与 `bookId` 解耦。流程：`POST /api/books/outline` → 拿到大纲 → `POST /api/books/` 创建 Book → `setPhase('ide')`。彻底杜绝 `ForeignKeyViolationError`（此前因 `currentBookId = pitchId` 导致 memory 表外键指向不存在的 Book）。
 
-### 5.9 时光溯源重塑 `POST /api/stream/revise`
+### 5.10 时光溯源重塑 `POST /api/stream/revise`
 
 **用途**：带上下文的章节重写与记忆重塑，支持指定改写范围
 
@@ -541,7 +614,7 @@ rag-memory-system/
 │       │   └── outline.py       # 大纲请求/响应模型
 │       └── routers/
 │           ├── books.py         # 书架管理：GET/POST/DELETE /api/books/ + POST /pitch + POST /outline
-│           ├── memory.py        # 核心 API：fetch / commit / override（book_id 物理隔离）
+│           ├── memory.py        # 核心 API：fetch / commit / override / rebuild（book_id 物理隔离 + 时间线覆写）
 │           ├── stream.py        # SSE 流式生成路由（五步闭环 + BackgroundTasks GC）+ POST /suggest 幽灵卡片 + POST /revise 时光溯源重塑（提取 X-LLM-* 头部，错误中文翻译）
 │           ├── ui.py            # UI 数据接口：entities / facts / chapters（book_id 过滤）
 │           ├── pitch.py         # 灵感裂变接口
@@ -560,7 +633,7 @@ rag-memory-system/
         ├── App.vue              # 四阶段 Transition 路由：TheLibrary → PitchRoom → OutlineForge → IDEWorkspace（挂载 SettingsModal）
         ├── style.css            # Tailwind v4 入口 @import "tailwindcss" + 自定义滚动条 + 动画
         ├── api/
-        │   ├── memory.js        # 封装 /fetch /commit /override /entities /facts /chapters（全部携带 book_id + X-LLM-* 头部）
+        │           ├── memory.js        # 封装 /fetch /commit /override /rebuild /entities /facts /chapters（全部携带 book_id + X-LLM-* 头部）
         │   └── stream.js        # SSE 客户端（fetch + ReadableStream + AbortController）+ fetchSuggestions()（携带 X-LLM-* 头部）
         ├── stores/
         │   ├── memoryStore.js   # 左栏灵魂：entities 分组 + newlyAddedIds 闪烁
@@ -853,4 +926,126 @@ curl -X POST http://localhost:8000/api/memory/fetch \
 curl -N -X POST http://localhost:8000/api/stream/generate \
   -H "Content-Type: application/json" \
   -d '{"book_id":"<book_id>","chapter_marker":1,"plot_context":"张三拔剑","extracted_triggers":["张三"]}'
+
+# 时间线覆写（需替换 book_id 和 chapter_number）
+curl -X POST http://localhost:8000/api/memory/<book_id>/rebuild/5 \
+  -H "Content-Type: application/json" \
+  -d '{"text":"修改后的章节全文..."}'
 ```
+
+---
+
+## 13. Zen Mode UI Refactoring（降噪柔化）
+
+### 设计动机
+
+原始 UI 存在三个视觉侵略性问题：
+1. **对比度天花板**：纯白背景 + 纯黑文字（`#000000`）导致长时间创作时眼部疲劳
+2. **视觉层级扁平**：所有元素使用相同色阶，缺乏视觉呼吸感
+3. **控制台侵略性**：状态提示使用高饱和色块，干扰创作沉浸感
+
+### Strike 1：降低对比度天花板
+
+| 元素 | 修改前 | 修改后 | 效果 |
+|------|--------|--------|------|
+| 主背景 | `bg-gray-900`（`#111827`） | `bg-[#0f0f12]` | 更深的墨色基底，减少蓝光 |
+| 面板背景 | `bg-gray-800`（`#1f2937`） | `bg-[#1a1a20]` | 柔和的炭灰色，与主背景形成微妙层次 |
+| 主文字 | `text-white` / `text-gray-100` | `text-gray-200`（`#e5e7eb`） | 降低亮度，减少眩光 |
+| 次级文字 | `text-gray-300` | `text-gray-400`（`#9ca3af`） | 进一步退后，建立视觉层级 |
+| 输入框背景 | `bg-gray-700` | `bg-[#1e1e26]` | 与面板微差，暗示可交互性 |
+
+### Strike 2：视觉层级后退
+
+通过 `z-index` 层级管理和 `opacity` 透明度梯度，建立清晰的视觉呼吸感：
+
+```
+顶层（z-40+）：模态框、气泡提示
+中层（z-10）：面板容器、按钮
+底层（z-0）：主背景
+```
+
+关键改动：
+- 顶栏从 `z-30` 降至 `z-10`，不再悬浮于所有元素之上
+- 三栏面板使用 `border-[#2a2a32]` 替代 `border-gray-700`，边框更柔和
+- 按钮 hover 效果从 `brightness-110` 改为 `opacity-80`，过渡更平滑
+- 滚动条从 `rgba(255,255,255,0.08)` 降至 `rgba(255,255,255,0.05)`，减少视觉干扰
+
+### Strike 3：降低控制台侵略性
+
+| 元素 | 修改前 | 修改后 |
+|------|--------|--------|
+| 状态步骤文字 | `text-green-400` / `text-blue-400` | `text-green-300/70` / `text-blue-300/70`（加 70% 透明度） |
+| 错误提示 | `text-red-500` + 红色背景 | `text-red-400/80` + 无背景色块 |
+| 骨架屏脉冲 | `bg-gray-600` 高亮 | `bg-[#2a2a32]` 柔光脉冲 |
+| 分隔线 | `border-gray-700` | `border-[#2a2a32]` |
+
+### 实现文件
+
+- [`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) — 三栏布局、顶栏、控制台、词条气泡全部降噪
+- [`style.css`](frontend/src/style.css) — 滚动条颜色调整
+- [`MemoryPanel.vue`](frontend/src/components/MemoryPanel.vue) — 面板背景色调整
+- [`MemoryExplorer.vue`](frontend/src/components/MemoryExplorer.vue) — 词条列表色阶调整
+
+---
+
+## 14. Telemetry HUD（遥测仪表盘）
+
+### 设计动机
+
+作者在创作时需要实时感知"写了多少"和"进度如何"，但传统字数统计要么藏在菜单深处，要么以数字形式粗暴展示，破坏沉浸感。Telemetry HUD 采用**水印级**设计——信息存在但不打扰。
+
+### 设计哲学：水印级（Watermark-Level）
+
+- **不占空间**：固定在右下角，不干扰三栏布局
+- **不抢注意力**：使用 `text-gray-500/40`（40% 透明度），比次级文字更低一阶
+- **信息密度极低**：仅显示三个核心指标——当前章节字数 / 总字数 / 章节数
+- **自动更新**：随 `storyStore.viewingChapter.content` 变化自动重算
+
+### 字数计算引擎
+
+[`storyStore.js`](frontend/src/stores/storyStore.js:63) 新增两个 getter：
+
+```javascript
+getters: {
+  // 当前章节字数（纯中文 + 英文单词数）
+  currentChapterWordCount: (state) => {
+    const text = state.viewingChapter?.content || ''
+    const cn = (text.match(/[\u4e00-\u9fff]/g) || []).length
+    const en = (text.match(/[a-zA-Z]+/g) || []).length
+    return cn + en
+  },
+  // 全书总字数（所有章节累加）
+  totalWordCount: (state) => {
+    return (state.chapters || []).reduce((sum, ch) => {
+      const text = ch.content || ''
+      const cn = (text.match(/[\u4e00-\u9fff]/g) || []).length
+      const en = (text.match(/[a-zA-Z]+/g) || []).length
+      return sum + cn + en
+    }, 0)
+  }
+}
+```
+
+### HUD 渲染
+
+[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) 右下角固定定位：
+
+```html
+<div class="fixed bottom-3 right-4 z-10 text-xs text-gray-500/40 select-none pointer-events-none leading-relaxed text-right">
+  <div>本卷 {{ storyStore.currentChapterWordCount }} 字</div>
+  <div>全书 {{ storyStore.totalWordCount }} 字</div>
+  <div>{{ storyStore.chapters.length }} 章</div>
+</div>
+```
+
+**关键设计决策**：
+- `pointer-events-none` — 鼠标穿透，不阻挡下方交互
+- `select-none` — 防止误选中
+- `text-right` — 右对齐，与右下角定位一致
+- `leading-relaxed` — 行间距舒适，不拥挤
+- 三行垂直排列，信息一目了然
+
+### 实现文件
+
+- [`storyStore.js`](frontend/src/stores/storyStore.js:63) — `currentChapterWordCount` + `totalWordCount` getters
+- [`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) — 右下角 HUD 渲染
