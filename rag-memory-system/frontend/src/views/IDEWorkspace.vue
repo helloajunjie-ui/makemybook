@@ -101,7 +101,7 @@
 
                 <!-- 阶段印记 -->
                 <div class="absolute top-4 right-4 text-[9px] font-mono text-gray-500 border border-gray-700 px-1.5 py-0.5 rounded">
-                  初见于 第 {{ tooltipEntry.facts && tooltipEntry.facts.length > 0 ? (tooltipEntry.facts[0].chapter_marker || tooltipEntry.facts[0].chapter || '?') : '?' }} 章
+                  初见于 第 {{ tooltipEntry.facts?.length > 0 ? (tooltipEntry.facts[0]?.chapter_marker ?? tooltipEntry.facts[0]?.chapter ?? '?') : '?' }} 章
                 </div>
 
                 <!-- 标题 -->
@@ -341,10 +341,10 @@
         <div class="px-8 py-5 border-b border-white/5 flex justify-between items-center bg-[#161925]/80 shrink-0">
           <div class="flex items-center space-x-3">
             <span class="text-xs font-mono text-blue-400 bg-blue-900/30 border border-blue-500/30 px-2 py-1 rounded">
-              VOLUME {{ storyStore.viewingChapter.volume }}
+              VOLUME {{ storyStore.viewingChapter?.volume ?? '?' }}
             </span>
             <h3 class="text-xl font-bold text-gray-200 tracking-wider">
-              {{ storyStore.viewingChapter.title }}
+              {{ storyStore.viewingChapter?.title ?? '未知章节' }}
             </h3>
           </div>
           <button @click="storyStore.closeChapterModal()" class="text-gray-500 hover:text-white transition w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center">✕</button>
@@ -354,7 +354,7 @@
         <div class="p-10 overflow-y-auto custom-scrollbar flex-1 bg-gradient-to-b from-[#0a0c10] to-[#161925] relative">
           <div class="text-gray-300 leading-[2.2] text-lg font-serif whitespace-pre-wrap max-w-2xl mx-auto selection:bg-blue-500/30 transition-all"
                :class="reviseDraft ? 'opacity-50' : 'opacity-100'">
-            {{ storyStore.viewingChapter.content }}
+            {{ storyStore.viewingChapter?.content ?? '' }}
           </div>
           <div v-if="reviseDraft || isRevising" class="absolute inset-0 p-10 bg-[#0a0c10]/80 backdrop-blur-sm overflow-y-auto custom-scrollbar">
             <div class="max-w-2xl mx-auto">

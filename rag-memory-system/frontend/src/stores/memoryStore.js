@@ -58,7 +58,7 @@ export const useMemoryStore = defineStore('memory', {
         type: fact.type,
         content: fact.content,
         triggers: fact.triggers || [],
-        facts: fact.content ? [{ content: fact.content }] : []
+        facts: fact.content ? [{ fact_id: fact.id || '', content: fact.content, chapter_marker: fact.chapter_marker || 0 }] : []
       })
       this.newlyAddedIds.push(fact.id)
       setTimeout(() => {

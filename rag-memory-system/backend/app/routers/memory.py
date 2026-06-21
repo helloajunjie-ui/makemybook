@@ -74,7 +74,7 @@ async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends
                 "facts": []
             }
         entity_map[me_id]["facts"].append(
-            FactItem(content=mf_content, chapter_marker=mf_chapter)
+            FactItem(fact_id=str(mf_id), content=mf_content, chapter_marker=mf_chapter)
         )
 
     found_entries = [EntityItem(**v) for v in entity_map.values()]

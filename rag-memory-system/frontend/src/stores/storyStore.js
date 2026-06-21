@@ -68,24 +68,36 @@ export const useStoryStore = defineStore('story', {
   },
 
   actions: {
+    /**
+     * 💡 全量重置 state（切换书籍 / 返回大厅时调用）
+     * 防止数据串库：旧书的 pitches / outline / chat / chapters 残留到新书
+     */
+    resetState() {
+      this.currentBookId = null
+      this.currentPitchId = null
+      this.promptSeed = ''
+      this.pitches = []
+      this.selectedPitch = null
+      this.currentChapter = 1
+      this.currentVolume = 1
+      this.outlineNodes = []
+      this.chatHistory = []
+      this.plotSuggestions = []
+      this.isSuggesting = false
+      this.currentDraft = ''
+      this.isGeneratingOutline = false
+      this.chapters = []
+      this.viewingChapter = null
+      this.customPrompt = ''
+      const memoryStore = useMemoryStore()
+      memoryStore.resetMemory()
+    },
+
     setPhase(phase) {
       this.currentPhase = phase
       // 💡 核心修复：一旦返回大厅，彻底清空工作台残影，防止数据串库
       if (phase === 'library') {
-        this.currentBookId = null
-        this.currentPitchId = null
-        this.chapters = []
-        this.chatHistory = []
-        this.outlineNodes = []
-        this.currentChapter = 1
-        this.currentVolume = 1
-        this.currentDraft = ''
-        this.plotSuggestions = []
-        this.isSuggesting = false
-        this.viewingChapter = null
-        // 同步清空记忆皮层
-        const memoryStore = useMemoryStore()
-        memoryStore.resetMemory()
+        this.resetState()
         this.loadBookshelf()
       }
     },
@@ -232,6 +244,7 @@ export const useStoryStore = defineStore('story', {
       this.pitches = []
       try {
         const response = await fetchWithBYOK('/api/books/pitch', {
+          book_id: this.currentBookId,
           seed_text: seedText,
           is_variant: isVariant,
           target_pitch: targetPitch

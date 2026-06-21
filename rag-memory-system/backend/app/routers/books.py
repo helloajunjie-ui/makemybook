@@ -91,6 +91,7 @@ async def create_book(req: CreateBookRequest, db: AsyncSession = Depends(get_db)
 
 
 class PitchRequest(BaseModel):
+    book_id: str
     seed_text: str
     is_variant: bool = False
     target_pitch: Optional[dict] = None
@@ -118,6 +119,7 @@ async def api_generate_pitches(req: PitchRequest, request: Request, db: AsyncSes
             except ValueError:
                 pass
         pitch = StoryPitch(
+            book_id=uuid.UUID(req.book_id),
             seed_text=req.seed_text,
             variant_of=variant_of,
             title=p.get("title", ""),
@@ -190,26 +192,27 @@ async def api_generate_outline(req: OutlineGenRequest, request: Request, db: Asy
 
 @router.delete("/{book_id}")
 async def delete_book(book_id: str, db: AsyncSession = Depends(get_db)):
-    """删除一本书及其所有关联的记忆数据"""
-    result = await db.execute(select(Book).where(Book.id == book_id))
+    """删除一本书及其所有关联数据（利用数据库级联外键）"""
+    try:
+        bid = uuid.UUID(book_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid book ID")
+
+    result = await db.execute(select(Book).where(Book.id == bid))
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
-    # 删除关联的 fact
-    entity_ids = await db.execute(
-        select(MemoryEntity.id).where(MemoryEntity.book_id == book_id)
+    # 1. 先删除该 book 下所有 pitch 关联的 outline 节点
+    pitch_ids = await db.execute(
+        select(StoryPitch.id).where(StoryPitch.book_id == bid)
     )
-    for (eid,) in entity_ids:
-        await db.execute(delete(MemoryFact).where(MemoryFact.entity_id == eid))
-    # 删除关联的 entity
-    await db.execute(delete(MemoryEntity).where(MemoryEntity.book_id == book_id))
-    # 删除关联的章节内容
-    await db.execute(delete(StoryChapter).where(StoryChapter.book_id == book_id))
-    # 删除关联的对话历史
-    await db.execute(delete(StoryChatMessage).where(StoryChatMessage.book_id == book_id))
-    # 删除 book
-    await db.execute(delete(Book).where(Book.id == book_id))
+    for (pid,) in pitch_ids:
+        await db.execute(delete(StoryOutlineNode).where(StoryOutlineNode.pitch_id == pid))
+    # 2. 删除该 book 下所有 pitch（级联删除由 DB 处理 outline，但 SQLAlchemy 需要手动）
+    await db.execute(delete(StoryPitch).where(StoryPitch.book_id == bid))
+    # 3. 删除 book（chapter / chat / entity / fact 由数据库级联删除）
+    await db.execute(delete(Book).where(Book.id == bid))
     await db.commit()
 
     return {"status": "success", "message": f"Book {book_id} deleted"}

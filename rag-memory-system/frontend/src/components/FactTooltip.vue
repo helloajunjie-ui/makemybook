@@ -3,8 +3,8 @@
     <div v-if="visible" class="tooltip-overlay" :style="{ top: y + 'px', left: x + 'px' }">
       <div class="tooltip-name">{{ entity?.entry_name }}</div>
       <div class="entity-type">{{ entity?.type }}</div>
-      <div v-for="f in facts" :key="f.fact_id" class="tooltip-fact">
-        [第{{ f.chapter_marker }}章] {{ f.content }}
+      <div v-for="(f, idx) in facts" :key="f.fact_id || idx" class="tooltip-fact">
+        [第{{ f.chapter_marker ?? '?' }}章] {{ f.content }}
       </div>
       <div v-if="facts.length === 0" class="tooltip-fact" style="color:#666;">暂无事实记录</div>
     </div>

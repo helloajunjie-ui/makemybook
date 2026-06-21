@@ -3,6 +3,7 @@ from datetime import datetime
 
 
 class PitchCreate(BaseModel):
+    book_id: str
     seed_text: str
     title: str
     summary: str
@@ -12,6 +13,7 @@ class PitchCreate(BaseModel):
 
 class PitchResponse(BaseModel):
     id: str
+    book_id: str
     seed_text: str
     variant_of: str | None
     title: str

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+import uuid
 
 from app.database import get_db
 from app.models.pitch import StoryPitch
@@ -12,8 +13,9 @@ router = APIRouter(prefix="/api/pitch", tags=["pitch"])
 @router.post("/create", response_model=PitchResponse)
 async def create_pitch(req: PitchCreate, db: AsyncSession = Depends(get_db)):
     pitch = StoryPitch(
+        book_id=uuid.UUID(req.book_id),
         seed_text=req.seed_text,
-        variant_of=req.variant_of,
+        variant_of=uuid.UUID(req.variant_of) if req.variant_of else None,
         title=req.title,
         summary=req.summary,
         tone=req.tone
@@ -23,6 +25,7 @@ async def create_pitch(req: PitchCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(pitch)
     return PitchResponse(
         id=str(pitch.id),
+        book_id=str(pitch.book_id),
         seed_text=pitch.seed_text,
         variant_of=str(pitch.variant_of) if pitch.variant_of else None,
         title=pitch.title,
@@ -41,6 +44,7 @@ async def list_pitches(db: AsyncSession = Depends(get_db)):
     pitches = result.scalars().all()
     return [PitchResponse(
         id=str(p.id),
+        book_id=str(p.book_id),
         seed_text=p.seed_text,
         variant_of=str(p.variant_of) if p.variant_of else None,
         title=p.title,

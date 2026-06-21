@@ -8,6 +8,7 @@ class FetchRequest(BaseModel):
 
 
 class FactItem(BaseModel):
+    fact_id: str = ""
     content: str
     chapter_marker: int
 
