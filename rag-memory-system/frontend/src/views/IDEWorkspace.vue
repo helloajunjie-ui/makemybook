@@ -243,7 +243,7 @@
                 </div>
                 <textarea
                   :value="storyStore.customPrompt"
-                  @input="storyStore.updateCustomPrompt($event.target.value)"
+                  @input="storyStore.customPrompt = $event.target.value; localStorage.setItem(`qingyu_prompt_${storyStore.currentBookId}`, $event.target.value)"
                   class="w-full h-24 bg-[#161925] border border-white/10 rounded-lg p-3 text-xs text-gray-300 placeholder-gray-600 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 outline-none resize-none custom-scrollbar"
                   placeholder="例如：&#10;1. 语言风格要求冷峻、克制，不要用华丽堆砌的辞藻。&#10;2. 战斗场面要拳拳到肉，多写动作细节。&#10;3. 每段尽量不要超过3行，节奏要快。"></textarea>
                 <div class="mt-2 flex justify-end">
@@ -566,6 +566,14 @@ onMounted(() => {
     setTimeout(() => {
       submitGeneration()
     }, 500)
+  }
+
+  // 💡 读取当前这本书的专属文风约束（Per-Book 基因隔离）
+  if (storyStore.currentBookId) {
+    const saved = localStorage.getItem(`qingyu_prompt_${storyStore.currentBookId}`)
+    if (saved) {
+      storyStore.customPrompt = saved
+    }
   }
 })
 

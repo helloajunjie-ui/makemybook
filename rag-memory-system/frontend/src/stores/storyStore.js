@@ -56,8 +56,8 @@ export const useStoryStore = defineStore('story', {
     isGeneratingOutline: false,
     chapters: [],
     viewingChapter: null,
-    // 💡 从本地存储读取文风约束，实现跨会话记忆
-    customPrompt: localStorage.getItem('qingyu_custom_prompt') || ''
+    // 💡 文风约束（由 IDEWorkspace 按 bookId 读写 localStorage）
+    customPrompt: ''
   }),
 
   getters: {
@@ -428,16 +428,6 @@ export const useStoryStore = defineStore('story', {
 
     closeChapterModal() {
       this.viewingChapter = null
-    },
-
-    // 💡 更新并持久化作者自定义文风约束
-    updateCustomPrompt(text) {
-      this.customPrompt = text
-      try {
-        localStorage.setItem('qingyu_custom_prompt', text)
-      } catch {
-        // 隐私模式等场景静默失败
-      }
     }
   }
 })

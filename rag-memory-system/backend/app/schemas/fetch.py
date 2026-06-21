@@ -15,6 +15,7 @@ class FactItem(BaseModel):
 class EntityItem(BaseModel):
     entry_name: str
     type: str
+    triggers: list[str] = []
     facts: list[FactItem]
 
 

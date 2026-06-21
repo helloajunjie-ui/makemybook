@@ -15,25 +15,41 @@ router = APIRouter(prefix="/api/memory", tags=["memory"])
 @router.post("/fetch", response_model=FetchResponse)
 async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends(get_db)):
     extracted = request.extracted_triggers
-    if not extracted:
-        return FetchResponse(status="success", data=FetchData(found_entries=[], missing_entries=[]))
 
-    stmt = text("""
-        SELECT me.id, me.entry_name, me.type, me.triggers,
-               mf.id, mf.content, mf.chapter_marker
-        FROM memory_entities me
-        JOIN memory_facts mf ON mf.entity_id = me.id
-        WHERE me.book_id = CAST(:book_id AS uuid)
-          AND me.triggers && :triggers
-          AND mf.chapter_marker <= :chapter
-          AND mf.is_active = true
-        ORDER BY me.id, mf.chapter_marker ASC
-    """)
-    stmt = stmt.bindparams(
-        book_id=str(request.book_id),
-        triggers=extracted,
-        chapter=request.current_chapter
-    )
+    # 💡 核心修复：如果 triggers 为空，返回本书所有已知实体（全量字典）
+    # 否则才用 triggers 做精确过滤
+    if not extracted:
+        stmt = text("""
+            SELECT me.id, me.entry_name, me.type, me.triggers,
+                   mf.id, mf.content, mf.chapter_marker
+            FROM memory_entities me
+            JOIN memory_facts mf ON mf.entity_id = me.id
+            WHERE me.book_id = CAST(:book_id AS uuid)
+              AND mf.chapter_marker <= :chapter
+              AND mf.is_active = 1
+            ORDER BY me.id, mf.chapter_marker ASC
+        """)
+        stmt = stmt.bindparams(
+            book_id=str(request.book_id),
+            chapter=request.current_chapter
+        )
+    else:
+        stmt = text("""
+            SELECT me.id, me.entry_name, me.type, me.triggers,
+                   mf.id, mf.content, mf.chapter_marker
+            FROM memory_entities me
+            JOIN memory_facts mf ON mf.entity_id = me.id
+            WHERE me.book_id = CAST(:book_id AS uuid)
+              AND me.triggers && :triggers
+              AND mf.chapter_marker <= :chapter
+              AND mf.is_active = 1
+            ORDER BY me.id, mf.chapter_marker ASC
+        """)
+        stmt = stmt.bindparams(
+            book_id=str(request.book_id),
+            triggers=extracted,
+            chapter=request.current_chapter
+        )
 
     result = await db.execute(stmt)
     rows = result.all()
@@ -44,14 +60,17 @@ async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends
     for row in rows:
         me_id, me_name, me_type, me_triggers, mf_id, mf_content, mf_chapter = row
 
-        for t in extracted:
-            if t in me_triggers:
-                found_triggers_set.add(t)
+        # 💡 triggers 数组重叠匹配：正文中的词是否命中实体的激活词
+        if extracted:
+            for t in extracted:
+                if t in (me_triggers or []):
+                    found_triggers_set.add(t)
 
         if me_id not in entity_map:
             entity_map[me_id] = {
                 "entry_name": me_name,
                 "type": me_type,
+                "triggers": me_triggers or [],
                 "facts": []
             }
         entity_map[me_id]["facts"].append(
@@ -59,7 +78,7 @@ async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends
         )
 
     found_entries = [EntityItem(**v) for v in entity_map.values()]
-    missing_entries = list(set(extracted) - found_triggers_set)
+    missing_entries = list(set(extracted) - found_triggers_set) if extracted else []
 
     return FetchResponse(
         status="success",

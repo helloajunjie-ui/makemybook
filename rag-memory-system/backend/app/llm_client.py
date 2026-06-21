@@ -47,9 +47,11 @@ def get_dynamic_model(model_name: str = None):
 
 
 async def stream_generate(system_prompt: str, api_key: str = None, base_url: str = None, model_name: str = None):
+    # 🚨 探针：如果终端看不到这行，说明代码没被重新加载！
+    print(">>> [探针] stream_generate 已加载新代码，无 async with")
     client = get_dynamic_client(api_key, base_url)
     model = get_dynamic_model(model_name)
-    async with client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -57,31 +59,39 @@ async def stream_generate(system_prompt: str, api_key: str = None, base_url: str
         ],
         stream=True,
         temperature=0.85
-    ) as stream:
-        async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+    )
+    async for chunk in response:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 async def extract_new_facts(text: str, api_key: str = None, base_url: str = None, model_name: str = None) -> list:
     extraction_prompt = """
 语言：中文。你必须使用中文回答。所有输出内容必须为中文。
 
-你是一个网文/游戏剧情的事实抽取器。请从以下文本中抽取所有可验证的剧情事实。
+你是一位顶级的游戏"世界书（Lorebook）"架构师。请从最新章节正文中，提取并编撰世界书词条。
 
-【抽取标准】：
-1. 只抽取明确陈述的事实（角色设定、事件、关系、世界观规则等）
-2. 不抽取模糊感受、修辞、对话中的假设
-3. 每个事实是一句完整的中文陈述
-4. 输出 JSON 数组
+【世界书编撰法则】：
+1. "entry_name"（词条）：严谨的专有名词（如角色名、地名、功法名），1-8字。
+2. "triggers"（触发关键词）：全词匹配，包含别名、外号、简称。禁用通用虚词。
+3. "type"（类型）：人物、地点、道具、事件、组织、能力、次要设定。
+4. "relations"（关联词条）：与该词条强相关的其他专有名词列表。
+5. "content"（世界书内容）：不要只写一句话！请用 50-200 字的精炼文本，写出它的人物性格、外貌特征、核心动机、或地点的历史背景。
 
 【强制输出规范】：
-1. 必须使用中文回答！必须使用中文回答！
-2. 请严格输出以下 JSON 结构，【不要】输出任何多余的解释、问候或 Markdown 之外的文字。
-3. 必须使用 ```json 包裹。
-
+必须输出包含 "entities" 键的 JSON：
 ```json
-["事实1", "事实2", "事实3"]
+{
+  "entities": [
+    {
+      "entry_name": "林晚晴",
+      "triggers": ["晚晴", "新娘", "林家大小姐"],
+      "type": "人物",
+      "relations": ["林建国", "陆夏川"],
+      "content": "林建国的女儿，与陆夏川结婚。外表身穿白色婚纱，性格隐忍且内心藏着复仇的决心。在婚礼之夜将带有N字母的项链扔进垃圾桶，标志着她斩断过去的决绝。"
+    }
+  ]
+}
 ```
 """
     client = get_dynamic_client(api_key, base_url)
@@ -97,11 +107,23 @@ async def extract_new_facts(text: str, api_key: str = None, base_url: str = None
         )
         raw = response.choices[0].message.content.strip()
         data = extract_json_from_markdown(raw)
+
+        # 💡 健壮解析：兼容两种输出格式
         if isinstance(data, list):
+            # 模型直接输出数组（旧格式兼容）
             return data
-        return []
+        elif isinstance(data, dict):
+            # 模型输出 {"entities": [...]} 包裹格式（新格式）
+            entities = data.get("entities", [])
+            if isinstance(entities, list):
+                return entities
+            print(f"[实体提取] 警告：entities 字段不是数组，实际类型: {type(entities)}")
+            return []
+        else:
+            print(f"[实体提取] 警告：无法识别的返回类型: {type(data)}，原始内容前100字符: {raw[:100]}")
+            return []
     except Exception as e:
-        print(f"事实抽取失败: {e}")
+        print(f"[实体提取失败] 发生了不可预知的错误: {e}")
         return []
 
 
@@ -109,16 +131,19 @@ async def compact_old_facts(entity_name: str, entity_type: str, facts_list: list
     prompt = f"""
 语言：中文。你必须使用中文回答。所有输出内容必须为中文。
 
-你是一个网文/游戏剧情的事实压缩器。请将以下关于「{entity_name}（{entity_type}）」的事实列表进行压缩合并。
+你是一位顶级的世界书（Lorebook）档案管理员。
+你要整理【实体：{entity_name}（{entity_type}）】在过往多个章节中积累的零散情报，将它们炼化为一份最新的、完整的、结构化的【世界书词条】。
 
-【压缩标准】：
-1. 合并语义重复的事实
-2. 删除过时或被覆盖的细节
-3. 保留所有不重复的关键信息
-4. 输出为 JSON 字符串数组
+【炼化法则】：
+1. 绝不遗漏：必须包含所有重要的历史事件（如从"被甩"到"断腿"再到"觉醒"的过程）。
+2. 结构清晰：请将内容组织成具有可读性的段落。
+3. 状态更新：如果人物的身份、立场发生了反转，请以【最新状态】为基调，将旧身份作为【背景经历】描述。
 
 原始事实：
 {json.dumps(facts_list, ensure_ascii=False, indent=2)}
+
+【格式示范】：
+张三，原为普通上班族（悦米的男友）。在第3章被女友抛弃后流落街头，随后在小巷被恶霸打断双腿。这一致命打击使他意外触碰"黑皮盒子"并觉醒异能。目前他对过去充满仇恨，性格变得冷酷偏激，正在暗中积蓄力量。
 
 【强制输出规范】：
 1. 必须使用中文回答！必须使用中文回答！
@@ -126,7 +151,7 @@ async def compact_old_facts(entity_name: str, entity_type: str, facts_list: list
 3. 必须使用 ```json 包裹。
 
 ```json
-["压缩后的事实1", "压缩后的事实2"]
+["炼化后的完整传记文本"]
 ```
 """
     client = get_dynamic_client(api_key, base_url)
@@ -267,9 +292,9 @@ async def generate_outline_from_llm(pitch: dict, api_key: str = None, base_url: 
 你是一位顶级的网文/游戏剧情主编。请严格执行【第二阶段：故事确认与大纲骨架锻造】标准。
 
 【执行标准】：
-1. 基于以下选定的创作方向，生成 3-6 个核心剧情卷（Volume）。
+1. 基于以下选定的创作方向，生成 10-15 个核心剧情卷（Volume）。
 2. 每个卷必须包含：卷标题、核心目标、情感曲线、主要地点、预估章节数。
-3. 卷之间必须有清晰的剧情递进逻辑。
+3. 卷之间必须有清晰的剧情递进逻辑，确保剧情节奏张弛有度。
 4. 所有内容必须使用中文。
 
 选定的创作方向：

@@ -23,7 +23,7 @@ async def run_compaction_task(entity_id: str, current_chapter: int):
                 MemoryFact, MemoryEntity.id == MemoryFact.entity_id
             ).where(
                 MemoryEntity.id == entity_id,
-                MemoryFact.is_active == True
+                MemoryFact.is_active == 1
             ).order_by(MemoryFact.chapter_marker.asc())
 
             result = await db.execute(stmt)
@@ -43,14 +43,14 @@ async def run_compaction_task(entity_id: str, current_chapter: int):
                 return
 
             for fact in facts:
-                fact.is_active = False
+                fact.is_active = 0
 
             for text in compacted_texts:
                 new_fact = MemoryFact(
                     entity_id=entity.id,
                     chapter_marker=current_chapter,
                     content=text,
-                    is_active=True,
+                    is_active=1,
                 )
                 db.add(new_fact)
 

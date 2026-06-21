@@ -1,6 +1,6 @@
-def build_injection_prompt(chapter_marker: int, fetch_response_data: dict, current_plot_context: str) -> str:
-    found_entries = fetch_response_data.get("found_entries", [])
-    missing_entries = fetch_response_data.get("missing_entries", [])
+def build_injection_prompt(chapter_marker: int, fetch_data, current_plot_context: str) -> str:
+    found_entries = fetch_data.found_entries
+    missing_entries = fetch_data.missing_entries
 
     prompt = f"""语言：中文。你必须使用中文回答。正文内容必须为中文。
 
@@ -15,9 +15,9 @@ def build_injection_prompt(chapter_marker: int, fetch_response_data: dict, curre
 
     if found_entries:
         for entry in found_entries:
-            facts = entry.get('facts', [])
-            facts_str = "；".join(f.get('content', '') for f in facts)
-            prompt += f"- 【{entry['entry_name']}】({entry['type']}): {facts_str}\n"
+            facts = entry.facts
+            facts_str = "；".join(f.content for f in facts)
+            prompt += f"- 【{entry.entry_name}】({entry.type}): {facts_str}\n"
     else:
         prompt += "- 当前时间节点无须特别约束的旧有设定。\n"
 
