@@ -64,7 +64,23 @@ export const useStoryStore = defineStore('story', {
     isLibraryPhase: (state) => state.currentPhase === 'library',
     isPitchPhase: (state) => state.currentPhase === 'pitch',
     isOutlinePhase: (state) => state.currentPhase === 'outline',
-    isIdePhase: (state) => state.currentPhase === 'ide'
+    isIdePhase: (state) => state.currentPhase === 'ide',
+
+    // 💡 遥测仪表盘：工业级字数统计（剔除所有不可见空白字符）
+    // 对齐网文平台标准：包含标点，但彻底剔除 \n / 空格 / 制表符
+    currentChapterWordCount: (state) => {
+      const currentCap = state.chapters.find(c => c.chapter_number === state.currentChapter);
+      const text = currentCap ? currentCap.content : '';
+      return text.replace(/\s+/g, '').length;
+    },
+
+    // 💡 全书总字数（累加所有章节）
+    totalWordCount: (state) => {
+      return state.chapters.reduce((total, cap) => {
+        const text = cap.content || '';
+        return total + text.replace(/\s+/g, '').length;
+      }, 0);
+    }
   },
 
   actions: {

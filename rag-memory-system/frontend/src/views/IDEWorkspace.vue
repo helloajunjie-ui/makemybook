@@ -141,9 +141,23 @@
       <!-- 中栏：剧本渲染与共创区 (最深色背景, flex-1) -->
       <section class="flex-1 flex flex-col bg-[#0F111A] relative">
 
-        <!-- 黄金阅读容器 -->
-        <div class="flex-1 overflow-y-auto custom-scrollbar" ref="chatContainer">
-          <div class="max-w-3xl mx-auto px-8 py-8">
+        <!-- 💡 顶部遥测仪表盘 (Telemetry HUD) — 水印级存在感 -->
+        <div class="absolute top-0 right-0 left-0 h-12 bg-gradient-to-b from-[#0B0D14]/80 to-transparent z-10 flex justify-end items-start pt-3 px-6 pointer-events-none select-none">
+          <div class="flex items-center gap-4 text-[11px] font-mono text-[#475569]/70 tracking-widest uppercase">
+            <div class="flex items-center gap-1.5">
+              <span class="w-1 h-1 bg-[#475569]/50 rounded-full"></span>
+              CH.{{ storyStore.currentChapter }} <span class="text-[#64748B]">{{ storyStore.currentChapterWordCount }}</span> W
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="w-1 h-1 bg-[#475569]/50 rounded-full"></span>
+              TOTAL <span class="text-[#64748B]">{{ storyStore.totalWordCount }}</span> W
+            </div>
+          </div>
+        </div>
+
+        <!-- 黄金阅读容器 (pt-12 为 HUD 让位) -->
+        <div class="flex-1 overflow-y-auto custom-scrollbar pt-12" ref="chatContainer">
+          <div class="max-w-3xl mx-auto px-8 pb-8">
 
             <!-- 状态机骨架屏 -->
             <div v-if="generating" class="mb-6 space-y-2">
