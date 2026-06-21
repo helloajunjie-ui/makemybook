@@ -40,7 +40,7 @@ Phase 4: 剧情渲染生成 (Generation)
   └─ 主AI带着注入的设定约束，通过 AsyncOpenAI 流式生成（temperature=0.8），逐 chunk 推送给前端打字机渲染
 
 Phase 5: 记忆沉淀归档 (Commit)
-  └─ 利用 JSON Mode（temperature=0.1）扫描新生成的正文，提取出新产生的事实碎片
+  └─ 利用 Markdown 剥离法（temperature=0.3）扫描新生成的正文，提取出新产生的事实碎片
   └─ 调用外挂的 /commit 接口，打上时间戳存入数据库
   └─ 后台触发 Memory GC：若实体事实超过 10 条，异步调用 LLM 炼化压缩
 ```
@@ -220,7 +220,7 @@ data: {"type": "done"}
 Phase 1&2 (Fetch): predict_fetch_memory(book_id=req.book_id, ...) — 真实数据库查询（物理隔离）
 Phase 3 (Inject):  build_injection_prompt() — 组装 System Prompt
 Phase 4 (Generate): stream_generate(system_prompt) — 真实 AsyncOpenAI 流式调用（temperature=0.8）
-Phase 5 (Commit):  extract_new_facts(full_text) — JSON Mode 提取（temperature=0.1）
+Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（temperature=0.3）
                    → find-or-create MemoryEntity(book_id=req.book_id) → append MemoryFact → db.commit()
                    → background_tasks: run_compaction_task() — 异步 Memory GC
 ```
@@ -249,8 +249,8 @@ Phase 5 (Commit):  extract_new_facts(full_text) — JSON Mode 提取（temperatu
 }
 ```
 
-**后端逻辑**（[`llm_client.py`](backend/app/llm_client.py:122)）：
-- `suggest_plot_directions(recent_context)` — temperature=0.8，JSON Mode
+**后端逻辑**（[`llm_client.py`](backend/app/llm_client.py:153)）：
+- `suggest_plot_directions(recent_context)` — temperature=0.8，Markdown 剥离法
 - 每个方向不超过 30 字，必须差异化（遇袭 / 发现线索 / 情感爆发）
 
 **前端交互**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue)）：
@@ -489,7 +489,7 @@ rag-memory-system/
 │       ├── main.py              # FastAPI 入口，挂载路由 + CORS
 │       ├── config.py            # 配置（数据库连接、embedding 维度等）
 │       ├── database.py          # SQLAlchemy async 引擎 & Session
-│       ├── llm_client.py        # AsyncOpenAI 动态客户端：get_dynamic_client() + stream_generate() + extract_new_facts() + compact_old_facts() + suggest_plot_directions() + generate_pitches_from_llm() + generate_outline_from_llm() + _translate_llm_error()
+│       ├── llm_client.py        # AsyncOpenAI 动态客户端：extract_json_from_markdown() + get_dynamic_client() + stream_generate() + extract_new_facts() + compact_old_facts() + suggest_plot_directions() + generate_pitches_from_llm() + generate_outline_from_llm() + _translate_llm_error()
 │       ├── memory_compactor.py  # 后台 Memory GC：阈值触发 → LLM 炼化 → 软删除旧事实 + 插入压缩事实
 │       ├── prompt_engine.py     # 上下文注入 Prompt 组装
 │       ├── extraction_engine.py # 写后提取 Prompt 组装 + 结果解析（备用）
@@ -620,7 +620,7 @@ X-LLM-Model: deepseek-chat
 
 ### 后端动态客户端
 
-[`llm_client.py`](backend/app/llm_client.py) 移除全局 `AsyncOpenAI()` 实例，改为 `get_dynamic_client()`：
+[`llm_client.py`](backend/app/llm_client.py:38) 移除全局 `AsyncOpenAI()` 实例，改为 `get_dynamic_client()`：
 
 ```python
 def get_dynamic_client(api_key: str = None, base_url: str = None):
@@ -631,7 +631,7 @@ def get_dynamic_client(api_key: str = None, base_url: str = None):
     return AsyncOpenAI(api_key=final_key, base_url=final_url)
 ```
 
-所有六个 LLM 函数（`stream_generate`、`extract_new_facts`、`compact_old_facts`、`suggest_plot_directions`、`generate_pitches_from_llm`、`generate_outline_from_llm`）均接受 `api_key`、`base_url`、`model_name` 可选参数。若未传入，回退到 `.env` 环境变量。
+所有七个 LLM 函数（`extract_json_from_markdown`、`stream_generate`、`extract_new_facts`、`compact_old_facts`、`suggest_plot_directions`、`generate_pitches_from_llm`、`generate_outline_from_llm`）均接受 `api_key`、`base_url`、`model_name` 可选参数。若未传入，回退到 `.env` 环境变量。
 
 ### 入口点
 
@@ -659,16 +659,18 @@ LLM_BASE_URL="https://api.deepseek.com"
 LLM_MODEL="deepseek-chat"
 ```
 
-### 四模式调用（[`llm_client.py`](backend/app/llm_client.py)）
+### 五模式调用（[`llm_client.py`](backend/app/llm_client.py)）
+
+所有 LLM 调用统一使用 **Markdown 剥离法（The Markdown Stripper）**：不传 `response_format`，让模型自然输出带 ` ```json ` 代码块的 markdown，后端通过 `extract_json_from_markdown()` 用正则 `re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)` 提取 JSON 并解析。彻底规避 DeepSeek `json_object` 模式下的 Constrained Decoder 对齐税问题。
 
 | 模式 | 函数 | temperature | 用途 |
 |------|------|-------------|------|
-| 流式生成 | `stream_generate(system_prompt)` | 0.8 | Phase 4 剧情渲染，逐 chunk 推送 SSE |
-| JSON 提取 | `extract_new_facts(text)` | 0.1 | Phase 5 记忆沉淀，`response_format={"type":"json_object"}` |
-| 记忆炼化 | `compact_old_facts(entity_name, entity_type, facts_list)` | 0.1 | Memory GC 后台压缩，`response_format={"type":"json_object"}` |
+| 流式生成 | `stream_generate(system_prompt)` | 0.85 | Phase 4 剧情渲染，逐 chunk 推送 SSE |
+| 事实抽取 | `extract_new_facts(text)` | 0.3 | Phase 5 记忆沉淀，Markdown 剥离法 |
+| 记忆炼化 | `compact_old_facts(entity_name, entity_type, facts_list)` | 0.3 | Memory GC 后台压缩，Markdown 剥离法 |
 | 极速推演 | `suggest_plot_directions(recent_context)` | 0.8 | 幽灵卡片，3 个差异化剧情走向建议 |
-| 灵感裂变 | `generate_pitches_from_llm(seed_text, ...)` | 0.8 | PitchRoom 灵感发散，3 个变体 |
-| 大纲锻造 | `generate_outline_from_llm(pitch, ...)` | 0.8 | OutlineForge 大纲骨架生成 |
+| 灵感裂变 | `generate_pitches_from_llm(seed_text, ...)` | 0.9 | PitchRoom 灵感发散，3 个变体 |
+| 大纲锻造 | `generate_outline_from_llm(pitch, ...)` | 0.85 | OutlineForge 大纲骨架生成 |
 
 ---
 

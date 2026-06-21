@@ -63,9 +63,9 @@
 
 ---
 
-## 技术支持
+## 项目结构
 
-**QQ 群**: `1051068329` | **作者**: 尼可
+```
 rag-memory-system/
 ├── docker-compose.yml
 ├── ARCHITECTURE.md          # 核心架构蓝图（必读）
@@ -78,12 +78,12 @@ rag-memory-system/
 │       ├── main.py          # FastAPI 入口
 │       ├── config.py        # 配置
 │       ├── database.py      # SQLAlchemy async 引擎
-│       ├── llm_client.py    # AsyncOpenAI 动态客户端（get_dynamic_client + 流式生成 + JSON 提取 + 记忆炼化）
+│       ├── llm_client.py    # AsyncOpenAI 动态客户端（extract_json_from_markdown + get_dynamic_client + 流式生成 + 事实抽取 + 记忆炼化 + 灵感裂变 + 大纲锻造）
 │       ├── memory_compactor.py # 后台 Memory GC
 │       ├── prompt_engine.py # 上下文注入 Prompt 组装
-│       ├── models/          # Book, MemoryEntity, MemoryFact, Pitch, Outline
+│       ├── models/          # Book, MemoryEntity, MemoryFact, StoryPitch, StoryOutlineNode, StoryChapter, StoryChatMessage, ApiConfig
 │       ├── schemas/         # fetch, commit, override, pitch, outline（全部含 book_id）
-│       └── routers/         # books, memory(物理隔离), stream(SSE+GC+X-LLM-*头部), ui, pitch, outline
+│       └── routers/         # books, memory(物理隔离), stream(SSE+GC+X-LLM-*头部), ui, pitch, outline, chapters, chat, settings
 └── frontend/
     ├── index.html
     ├── vite.config.js
@@ -114,3 +114,9 @@ rag-memory-system/
             ├── FactTooltip.vue
             └── ...
 ```
+
+---
+
+## 技术支持
+
+**QQ 群**: `1051068329` | **作者**: 尼可

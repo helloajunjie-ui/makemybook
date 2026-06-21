@@ -36,7 +36,7 @@
       <!-- 状态 2：变体卡片展示区 -->
       <div v-else class="w-full max-w-6xl mt-8">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 animate-[fade-in-up_0.5s_ease-out]">
-          <div v-for="pitch in storyStore.pitches" :key="pitch.id"
+          <div v-for="(pitch, index) in storyStore.pitches" :key="pitch.id"
                class="group bg-[#161925]/60 backdrop-blur-md border border-white/5 hover:border-blue-500/40 rounded-2xl flex flex-col transition-all shadow-lg hover:shadow-[0_10px_30px_rgba(37,99,235,0.1)]">
 
             <!-- 卡片头部信息 -->
@@ -52,12 +52,12 @@
             <div class="mt-auto p-4 border-t border-white/5 flex gap-2 bg-[#0a0c10]/30 rounded-b-2xl">
               <button @click="storyStore.generateOutline(pitch.id)"
                       class="flex-1 bg-blue-600/20 hover:bg-blue-600 border border-blue-600/50 text-blue-300 hover:text-white rounded-lg py-2 text-sm font-bold transition-colors">
-                U{{ pitch.id }} 敲定骨架
+                U{{ index + 1 }} 敲定骨架
               </button>
               <button @click="setVariantTarget(pitch)"
                       class="px-4 bg-[#161925] hover:bg-[#1a2035] border border-white/10 text-gray-300 hover:text-white rounded-lg text-sm transition-colors shadow-inner"
                       title="对这个方向不满意？点击基于它提出修改建议">
-                V{{ pitch.id }}
+                V{{ index + 1 }}
               </button>
             </div>
           </div>

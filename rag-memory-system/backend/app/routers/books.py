@@ -80,7 +80,7 @@ async def api_generate_pitches(req: PitchRequest, request: Request, db: AsyncSes
             seed_text=req.seed_text,
             variant_of=variant_of,
             title=p.get("title", ""),
-            summary=p.get("summary", ""),
+            summary=p.get("summary") or p.get("title", ""),
             tone=p.get("tone"),
         )
         db.add(pitch)
