@@ -16,7 +16,7 @@ class StoryOutlineNode(Base):
     emotion_curve = Column(String(100), nullable=True)
     location = Column(String(255), nullable=True)
     estimated_chapters = Column(Integer, default=5)
-    status = Column(String(20), default="pending")
+    status = Column(String(50), default="pending")
     sort_order = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

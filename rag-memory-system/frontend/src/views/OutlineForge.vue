@@ -30,10 +30,6 @@
           </div>
         </div>
 
-        <button class="relative pl-20 text-gray-500 hover:text-blue-400 flex items-center transition-colors font-medium">
-          <div class="absolute left-[18px] w-6 h-6 rounded-full bg-gray-800 border border-dashed border-gray-500 flex items-center justify-center">+</div>
-          衍生新篇章 (Add Volume)
-        </button>
       </div>
     </main>
   </div>

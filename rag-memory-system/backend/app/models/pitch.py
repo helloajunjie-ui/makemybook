@@ -9,11 +9,12 @@ class StoryPitch(Base):
     __tablename__ = "story_pitches"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    book_id = Column(UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False, index=True)
+    book_id = Column(UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True, index=True)
     seed_text = Column(Text, nullable=False)
     variant_of = Column(UUID(as_uuid=True), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     summary = Column(Text, nullable=False)
     tone = Column(String(100), nullable=True)
+    details = Column(Text, nullable=True, default="")
     is_selected = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

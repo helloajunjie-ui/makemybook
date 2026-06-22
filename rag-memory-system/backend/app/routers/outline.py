@@ -37,6 +37,21 @@ async def list_nodes(pitch_id: str, db: AsyncSession = Depends(get_db)):
     return [_to_response(n) for n in nodes]
 
 
+# 💡【P1-5 修复】通过 book_id 查大纲（绕过 pitch_id 依赖）
+# outline → pitch → book 链路：StoryOutlineNode.pitch_id → StoryPitch.id → StoryPitch.book_id
+@router.get("/by-book/{book_id}", response_model=list[OutlineNodeResponse])
+async def list_nodes_by_book(book_id: str, db: AsyncSession = Depends(get_db)):
+    from app.models.pitch import StoryPitch
+    result = await db.execute(
+        select(StoryOutlineNode)
+        .join(StoryPitch, StoryOutlineNode.pitch_id == StoryPitch.id)
+        .where(StoryPitch.book_id == book_id)
+        .order_by(StoryOutlineNode.sort_order.asc())
+    )
+    nodes = result.scalars().all()
+    return [_to_response(n) for n in nodes]
+
+
 @router.put("/update/{node_id}", response_model=OutlineNodeResponse)
 async def update_node(node_id: str, req: OutlineNodeUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(

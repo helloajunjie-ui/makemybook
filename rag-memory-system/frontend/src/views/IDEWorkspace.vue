@@ -35,7 +35,8 @@
         <button @click="settingsStore.openPanel()" class="text-[#64748B] hover:text-[#94A3B8] transition flex items-center">
           <span class="mr-1">⚙️</span> 偏好设定
         </button>
-        <button class="px-4 py-1.5 bg-[#2E3C56]/30 text-[#94A3B8] border border-white/5 rounded-lg hover:bg-[#2E3C56] hover:text-[#D1D5DB] transition shadow-sm font-medium">
+        <button @click="exportCurrentVolume"
+                class="px-4 py-1.5 bg-[#2E3C56]/30 text-[#94A3B8] border border-white/5 rounded-lg hover:bg-[#2E3C56] hover:text-[#D1D5DB] transition shadow-sm font-medium">
           导出全卷
         </button>
       </div>
@@ -244,40 +245,9 @@
               <span class="text-xs font-mono text-blue-400/80 tracking-wider">{{ sysStatus }}</span>
             </div>
 
-            <!-- 💡 文风约束弹窗（毛玻璃，绝对定位在输入框上方） -->
-            <div v-if="showStyleModal"
-                 class="relative mb-3">
-              <div class="w-full p-4 bg-[#0F111A]/95 backdrop-blur-2xl border border-blue-500/20 rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.8)]">
-                <div class="flex justify-between items-center mb-3">
-                  <h3 class="text-xs font-bold text-[#94A3B8] flex items-center">
-                    <span class="w-1 h-3 bg-blue-500/50 rounded-full mr-2"></span>
-                    全局文风与规则约束（最高优先级）
-                  </h3>
-                  <button @click="showStyleModal = false" class="text-gray-500 hover:text-white transition-colors text-xs">✕</button>
-                </div>
-                <textarea
-                  v-model="storyStore.customPrompt"
-                  class="w-full h-24 bg-[#131620] border border-white/[0.05] rounded-lg p-3 text-xs text-[#8B9EB0] placeholder-[#475569] focus:border-blue-500/30 focus:ring-1 focus:ring-blue-500/20 outline-none resize-none custom-scrollbar"
-                  placeholder="例如：&#10;1. 语言风格要求冷峻、克制，不要用华丽堆砌的辞藻。&#10;2. 战斗场面要拳拳到肉，多写动作细节。&#10;3. 每段尽量不要超过3行，节奏要快。"></textarea>
-                <div class="mt-2 flex justify-end">
-                  <button @click="storyStore.saveCustomPrompt(storyStore.customPrompt); showStyleModal = false"
-                          class="px-3 py-1 bg-[#2E3C56] hover:bg-[#3B4D6B] rounded text-[10px] font-bold text-[#D1D5DB] transition-colors shadow-lg">
-                    保存并应用
-                  </button>
-                </div>
-              </div>
-            </div>
-
             <!-- glassmorphism 输入框 -->
             <div class="flex gap-2">
               <div class="relative flex-1">
-                <!-- 💡 文风约束呼出按钮（输入框左上角） -->
-                <div class="absolute -top-6 left-0 flex items-center gap-2 z-10">
-                  <button @click="showStyleModal = !showStyleModal"
-                          class="text-[10px] flex items-center px-2 py-0.5 bg-[#131620]/50 hover:bg-blue-900/30 border border-white/[0.03] hover:border-blue-500/30 rounded text-[#64748B] hover:text-[#94A3B8] transition-all">
-                    ⚙️ 文风约束{{ storyStore.customPrompt ? ' ✓' : '' }}
-                  </button>
-                </div>
                 <textarea
                   v-model="storyStore.currentDraft"
                   class="w-full h-24 bg-[#131620] backdrop-blur-xl border border-white/[0.05] rounded-2xl p-3 pl-4 text-sm text-[#8B9EB0] focus:outline-none focus:border-blue-500/30 focus:ring-1 focus:ring-blue-500/20 resize-none transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.4),0_8px_30px_rgba(0,0,0,0.4)]"
@@ -298,6 +268,39 @@
                 <button class="px-4 py-2 bg-gradient-to-r from-[#2E3C56] to-[#3B4D6B] rounded hover:from-[#3B4D6B] hover:to-[#4A5C7A] transition text-sm whitespace-nowrap text-[#D1D5DB]"
                         @click="storyStore.advanceVolume()"
                         :disabled="generating">📖 推进卷宗</button>
+              </div>
+            </div>
+
+            <!-- 💡 文风约束：移到输入框下方 -->
+            <div class="flex items-center gap-2 mt-2">
+              <button @click="showStyleModal = !showStyleModal"
+                      class="text-[10px] flex items-center px-2 py-0.5 bg-[#131620]/50 hover:bg-blue-900/30 border border-white/[0.03] hover:border-blue-500/30 rounded text-[#64748B] hover:text-[#94A3B8] transition-all">
+                ⚙️ 文风约束{{ storyStore.customPrompt ? ' ✓' : '' }}
+              </button>
+              <span v-if="storyStore.customPrompt" class="text-[9px] text-[#475569] truncate max-w-[200px]">{{ storyStore.customPrompt.slice(0, 40) }}{{ storyStore.customPrompt.length > 40 ? '...' : '' }}</span>
+            </div>
+
+            <!-- 💡 文风约束弹窗（毛玻璃，在输入框下方展开） -->
+            <div v-if="showStyleModal"
+                 class="mt-2">
+              <div class="w-full p-4 bg-[#0F111A]/95 backdrop-blur-2xl border border-blue-500/20 rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.8)]">
+                <div class="flex justify-between items-center mb-3">
+                  <h3 class="text-xs font-bold text-[#94A3B8] flex items-center">
+                    <span class="w-1 h-3 bg-blue-500/50 rounded-full mr-2"></span>
+                    全局文风与规则约束（最高优先级）
+                  </h3>
+                  <button @click="showStyleModal = false" class="text-gray-500 hover:text-white transition-colors text-xs">✕</button>
+                </div>
+                <textarea
+                  v-model="storyStore.customPrompt"
+                  class="w-full h-24 bg-[#131620] border border-white/[0.05] rounded-lg p-3 text-xs text-[#8B9EB0] placeholder-[#475569] focus:border-blue-500/30 focus:ring-1 focus:ring-blue-500/20 outline-none resize-none custom-scrollbar"
+                  placeholder="例如：&#10;1. 语言风格要求冷峻、克制，不要用华丽堆砌的辞藻。&#10;2. 战斗场面要拳拳到肉，多写动作细节。&#10;3. 每段尽量不要超过3行，节奏要快。"></textarea>
+                <div class="mt-2 flex justify-end">
+                  <button @click="storyStore.saveCustomPrompt(storyStore.customPrompt); showStyleModal = false"
+                          class="px-3 py-1 bg-[#2E3C56] hover:bg-[#3B4D6B] rounded text-[10px] font-bold text-[#D1D5DB] transition-colors shadow-lg">
+                    保存并应用
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -618,14 +621,14 @@ function submitGeneration() {
   resetSteps()
 
   const draftText = String(storyStore.currentDraft || '').trim()
-  const triggers = draftText.match(/[\u4e00-\u9fa5]{2,}/g) || []
 
   const params = {
     book_id: storyStore.currentBookId,
     chapter_marker: storyStore.currentChapter,
     plot_context: storyStore.currentDraft,
-    extracted_triggers: triggers,
-    custom_prompt: storyStore.customPrompt  // 💡 随身携带"尚方宝剑"
+    query_text: draftText,  // 💡 RAG v2：传原始文本给后端做向量检索，不再用正则盲抓
+    custom_prompt: storyStore.customPrompt,
+    current_volume: storyStore.currentVolume  // 💡【阶段锁定】当前卷号
   }
 
   abortController = startGeneration(params, {
@@ -705,6 +708,41 @@ function stopGeneration() {
   generating.value = false
   memoryStore.isLoading = false
   resetSteps()
+}
+
+// 导出当前卷所有章节为 TXT 文件
+function exportCurrentVolume() {
+  const vol = storyStore.currentVolume
+  const chapters = storyStore.chapters.filter(c => Number(c.volume) === Number(vol))
+  if (chapters.length === 0) {
+    errorMessage.value = '当前卷暂无章节可导出'
+    return
+  }
+
+  const outline = storyStore.outlineNodes.find(n => Number(n.volume_number) === Number(vol))
+  const volTitle = outline ? outline.title : `第${vol}卷`
+  const bookTitle = storyStore.selectedPitch?.title || '未命名作品'
+
+  const lines = []
+  lines.push(`${bookTitle} - ${volTitle}`)
+  lines.push('='.repeat(40))
+  lines.push('')
+
+  for (const ch of chapters) {
+    lines.push(`第 ${ch.chapter} 章 ${ch.title || ''}`)
+    lines.push('-'.repeat(30))
+    lines.push(ch.content || '')
+    lines.push('')
+    lines.push('')
+  }
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${bookTitle}-${volTitle}.txt`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 const triggerRevision = async () => {

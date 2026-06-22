@@ -10,7 +10,7 @@ from app.llm_client import compact_old_facts
 
 AsyncSessionLocal = sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 
-COMPACTION_THRESHOLD = 10
+COMPACTION_THRESHOLD = 30  # 💡 RAG v2：长篇小说重要角色 30 条以内不压缩
 
 
 async def run_compaction_task(entity_id: str, current_chapter: int):
@@ -48,6 +48,7 @@ async def run_compaction_task(entity_id: str, current_chapter: int):
             for text in compacted_texts:
                 new_fact = MemoryFact(
                     entity_id=entity.id,
+                    book_id=entity.book_id,
                     chapter_marker=current_chapter,
                     content=text,
                     is_active=1,

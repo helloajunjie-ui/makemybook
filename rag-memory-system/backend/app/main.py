@@ -1,3 +1,16 @@
+import sys
+# ═══════════════════════════════════════════════════════════════
+# 架构级防御：强制 Windows 终端使用 UTF-8 编码
+# 彻底消灭 GBK 编码错误（如 emoji 导致的崩溃）
+# ═══════════════════════════════════════════════════════════════
+if sys.stdout.encoding.lower() != 'utf-8':
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+
+if sys.stderr.encoding.lower() != 'utf-8':
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

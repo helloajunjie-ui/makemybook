@@ -36,7 +36,7 @@
       <!-- 状态 2：变体卡片展示区 -->
       <div v-else class="w-full max-w-6xl mt-8">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 animate-[fade-in-up_0.5s_ease-out]">
-          <div v-for="(pitch, index) in storyStore.pitches" :key="pitch.id"
+          <div v-for="(pitch, index) in storyStore.pitches" :key="pitch.id || index"
                class="group bg-[#161925]/60 backdrop-blur-md border border-white/5 hover:border-blue-500/40 rounded-2xl flex flex-col transition-all shadow-lg hover:shadow-[0_10px_30px_rgba(37,99,235,0.1)]">
 
             <!-- 卡片头部信息 -->
@@ -45,12 +45,27 @@
                 {{ pitch.tone }}
               </div>
               <h3 class="text-2xl font-bold text-gray-100 mb-3">{{ pitch.title }}</h3>
-              <p class="text-sm text-gray-400 leading-relaxed">{{ pitch.summary }}</p>
+              <p class="text-sm text-gray-400 leading-relaxed mb-3">{{ pitch.summary }}</p>
+
+              <!-- 详情展开/收起 -->
+              <div v-if="pitch.details">
+                <button @click.stop="pitch.showDetails = !pitch.showDetails"
+                        class="text-xs text-blue-400/70 hover:text-blue-300 transition-colors flex items-center gap-1">
+                  <span v-if="pitch.showDetails">▲ 收起详情</span>
+                  <span v-else>▼ 展开详细设定</span>
+                </button>
+                <transition name="details-fade">
+                  <div v-if="pitch.showDetails"
+                       class="mt-3 text-xs text-gray-500 leading-relaxed border-l-2 border-blue-500/20 pl-3 whitespace-pre-wrap">
+                    {{ pitch.details }}
+                  </div>
+                </transition>
+              </div>
             </div>
 
             <!-- 底部操作栏 -->
             <div class="mt-auto p-4 border-t border-white/5 flex gap-2 bg-[#0a0c10]/30 rounded-b-2xl">
-              <button @click="storyStore.generateOutline(pitch.id)"
+              <button @click="storyStore.generateOutline(pitch)"
                       class="flex-1 bg-blue-600/20 hover:bg-blue-600 border border-blue-600/50 text-blue-300 hover:text-white rounded-lg py-2 text-sm font-bold transition-colors">
                 U{{ index + 1 }} 敲定骨架
               </button>
@@ -135,5 +150,15 @@ const submitFeedback = async () => {
 @keyframes fade-in-up {
   0% { opacity: 0; transform: translateY(20px); }
   100% { opacity: 1; transform: translateY(0); }
+}
+
+.details-fade-enter-active,
+.details-fade-leave-active {
+  transition: all 0.25s ease;
+}
+.details-fade-enter-from,
+.details-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 </style>

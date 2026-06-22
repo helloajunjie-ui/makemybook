@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/pitch", tags=["pitch"])
 @router.post("/create", response_model=PitchResponse)
 async def create_pitch(req: PitchCreate, db: AsyncSession = Depends(get_db)):
     pitch = StoryPitch(
-        book_id=uuid.UUID(req.book_id),
+        book_id=uuid.UUID(req.book_id) if req.book_id else None,
         seed_text=req.seed_text,
         variant_of=uuid.UUID(req.variant_of) if req.variant_of else None,
         title=req.title,
@@ -25,7 +26,7 @@ async def create_pitch(req: PitchCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(pitch)
     return PitchResponse(
         id=str(pitch.id),
-        book_id=str(pitch.book_id),
+        book_id=str(pitch.book_id) if pitch.book_id else "",
         seed_text=pitch.seed_text,
         variant_of=str(pitch.variant_of) if pitch.variant_of else None,
         title=pitch.title,
@@ -44,7 +45,7 @@ async def list_pitches(db: AsyncSession = Depends(get_db)):
     pitches = result.scalars().all()
     return [PitchResponse(
         id=str(p.id),
-        book_id=str(p.book_id),
+        book_id=str(p.book_id) if p.book_id else "",
         seed_text=p.seed_text,
         variant_of=str(p.variant_of) if p.variant_of else None,
         title=p.title,

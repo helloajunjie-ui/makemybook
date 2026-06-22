@@ -141,11 +141,12 @@ export const useStoryStore = defineStore('story', {
       const memoryStore = useMemoryStore()
       memoryStore.resetMemory()
       this.currentBookId = bookId
+      // 💡【P1-4 修复】废除用 title 匹配的愚蠢逻辑，严格使用 book_id 查 pitch
       try {
         const pitchRes = await fetch('/api/pitch/list')
         if (pitchRes.ok) {
           const pitches = await pitchRes.json()
-          const match = pitches.find(p => p.title === bookTitle)
+          const match = pitches.find(p => p.book_id === bookId)
           if (match) {
             this.currentPitchId = match.id
             this.selectedPitch = match
@@ -167,9 +168,16 @@ export const useStoryStore = defineStore('story', {
     },
 
     async loadOutlineFromDb() {
-      if (!this.currentPitchId) return
+      // 💡【P1-5 修复】优先用 pitchId 查，若为空但有 bookId 则用 book_id 兜底
+      if (!this.currentPitchId && !this.currentBookId) return
       try {
-        const res = await fetch(`/api/outline/list/${this.currentPitchId}`)
+        let url
+        if (this.currentPitchId) {
+          url = `/api/outline/list/${this.currentPitchId}`
+        } else {
+          url = `/api/outline/by-book/${this.currentBookId}`
+        }
+        const res = await fetch(url)
         if (res.ok) {
           const nodes = await res.json()
           if (nodes && nodes.length > 0) {
@@ -272,9 +280,10 @@ export const useStoryStore = defineStore('story', {
       }
     },
 
-    async generateOutline(pitchId) {
-      this.selectedPitch = this.pitches.find(p => p.id === pitchId)
-      this.currentPitchId = pitchId
+    async generateOutline(pitch) {
+      // 💡 修复：PitchRoom 直接传 pitch 对象，避免 id 为空字符串时匹配错误
+      this.selectedPitch = pitch
+      this.currentPitchId = pitch?.id || ''
       this.isGeneratingOutline = true
       try {
         const response = await fetchWithBYOK('/api/books/outline', {
@@ -295,14 +304,15 @@ export const useStoryStore = defineStore('story', {
         this.setPhase('outline')
 
         // 💡 大纲生成成功后，自动创建 Book 记录，确保 currentBookId 是真实的 book_id
-        // 而不是 pitch_id（pitch_id 在 story_pitches 表，book_id 在 books 表，外键约束不同）
+        // 同时传入选中的 pitch_id，让后端完成"认亲手术"（绑定 book_id 到 Pitch）
         try {
           const bookRes = await fetch('/api/books/', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               title: this.selectedPitch?.title || '未命名世界',
-              summary: this.selectedPitch?.summary || ''
+              summary: this.selectedPitch?.summary || '',
+              pitch_id: this.selectedPitch?.id || this.currentPitchId || ''
             })
           })
           if (bookRes.ok) {
@@ -343,7 +353,7 @@ export const useStoryStore = defineStore('story', {
       try {
         const recentChats = this.chatHistory.slice(-3).map(c => c.text || c.content || '').join('\n')
         const { fetchSuggestions } = await import('../api/stream')
-        const json = await fetchSuggestions(recentChats || '故事刚刚开始...')
+        const json = await fetchSuggestions(recentChats || '故事刚刚开始...', this.currentBookId)
         this.plotSuggestions = json.data || []
       } catch (error) {
         console.error('推演失败', error)

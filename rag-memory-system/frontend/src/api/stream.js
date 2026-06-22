@@ -68,11 +68,11 @@ export function startGeneration(params, handlers) {
   return controller
 }
 
-export async function fetchSuggestions(recentContext) {
+export async function fetchSuggestions(recentContext, bookId = '') {
   const res = await fetch(`${BASE}/suggest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...llmHeaders() },
-    body: JSON.stringify({ recent_context: recentContext })
+    body: JSON.stringify({ book_id: bookId, recent_context: recentContext })
   })
   return res.json()
 }

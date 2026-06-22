@@ -1,10 +1,12 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class FetchRequest(BaseModel):
     book_id: str
     current_chapter: int
-    extracted_triggers: list[str]
+    extracted_triggers: list[str] = []  # 兼容旧版（不再使用）
+    query_text: str = ""  # 💡 RAG v2：原始文本，后端做向量检索
 
 
 class FactItem(BaseModel):
