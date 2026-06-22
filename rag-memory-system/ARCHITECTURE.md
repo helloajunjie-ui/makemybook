@@ -1,1051 +1,433 @@
-# 核心架构蓝图：基于事件溯源的小说创作记忆外挂系统
+# 青羽·织梦宇宙 — 架构文档
 
-**版本**: 4.0 | **架构师**: 青羽 | **定位**: 独立外挂认知中间件
-
----
-
-## 1. 核心产品定义与哲学
-
-### 认知解耦（Cognitive Decoupling）
-彻底分离"逻辑推演（主AI）"与"事实存储（记忆外挂）"。主AI作为CPU负责渲染剧情，记忆系统作为内存+硬盘提供绝对精准的世界观状态。
-
-### 时间序列状态机（Time-Series State Machine）
-小说的本质是随时间流逝的世界状态变更。系统抛弃传统的 CRUD 修改逻辑，采用**事件溯源（Event Sourcing）**思想。每一次设定的变更都是一次带有 `chapter_marker`（章节时间戳）的事实追加（Append-only）。
-
-### 防穿透原则
-严格基于时间轴隔离数据，确保第 N 章的推演绝对无法获取 N+1 章的设定，彻底杜绝"预知未来"的逻辑崩塌。
-
-### 多租户物理隔离（Tenant Isolation）
-以 `Book`（书籍/项目）作为最高层级容器。所有实体、事实、大纲数据通过 `book_id` 外键实现物理级隔离，杜绝跨书串库幻觉。
-
-### 漏斗收敛（Funnel Convergence）
-创作流程从发散到收敛：**书架大厅（TheLibrary）→ 灵感裂变（PitchRoom）→ 大纲锻造（OutlineForge）→ 三栏IDE（IDEWorkspace）**。四个阶段由 `storyStore.currentPhase` 单一状态源驱动，`<Transition>` 动画平滑切换。
+> 最后更新：2026-06-22（v4 — 记忆融合引擎 + 阶段锁定 + 实体消歧）
 
 ---
 
-## 2. Agentic RAG 工作流：五步闭环（ReAct 模式）
-
-```
-Phase 1: 前置思考与提取 (Planning)
-  └─ 主AI阅读前文，输出JSON格式的"剧情推演思路"及"即将用到的词条清单(Triggers)"
-
-Phase 2: 预测性记忆召回 (Fetch)
-  └─ 系统拦截AI的词条清单，携带当前 chapter_marker + book_id，调用记忆外挂的 /fetch 接口
-  └─ 返回匹配词条的原子化事实 + 明确标注"库中未有的新设定"
-
-Phase 3: 上下文动态注入 (Context Injection)
-  └─ 系统将召回的设定事实，组装为强约束性的 System Prompt（上帝视角的设定字典）
-
-Phase 4: 剧情渲染生成 (Generation)
-  └─ 主AI带着注入的设定约束，通过 AsyncOpenAI 流式生成（temperature=0.8），逐 chunk 推送给前端打字机渲染
-
-Phase 5: 记忆沉淀归档 (Commit)
-  └─ 利用 Markdown 剥离法（temperature=0.3）扫描新生成的正文，提取出新产生的事实碎片
-  └─ 调用外挂的 /commit 接口，打上时间戳存入数据库
-  └─ 后台触发 Memory GC：若实体事实超过 10 条，异步调用 LLM 炼化压缩
-
-**提取增强**（[`llm_client.py`](backend/app/llm_client.py:68)）：`extract_new_facts()` 要求 LLM 输出 `{"entities": [...]}` 包裹的 JSON，而非裸数组。`extract_json_from_markdown()` 使用 `re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)` 提取代码块后，再尝试 `json.loads()` 解析。若顶层是 `{"entities": [...]}` 则解一层，若直接是 `[...]` 也兼容。双重防御：任何解析失败返回空列表，绝不崩溃。
-```
-
----
-
-## 3. 技术栈
-
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| 数据库 | PostgreSQL 15+ + pgvector | 单库解决实体关联 + JSONB + 时间轴截断 + GIN倒排 + 向量索引 |
-| 服务端 | Python 3.11+ / FastAPI | 异步高并发，SQLAlchemy 2.0 async + Pydantic v2 |
-| LLM 客户端 | AsyncOpenAI (openai 1.6.1+) | 支持 DeepSeek / 任意兼容 OpenAI SDK 的 relay 中转站 |
-| 客户端 | Vue 3 (Composition API) + Vite + Pinia + Tailwind CSS v4 | 四阶段漏斗布局，零第三方UI库 |
-| 样式引擎 | Tailwind CSS v4 + PostCSS + Autoprefixer | 原子化 CSS，`@import "tailwindcss"` 入口 |
-| 流式传输 | SSE (Server-Sent Events) | 基于原生 HTTP 的单向高频文本流，轻量无心跳 |
-| 容器化 | Docker Compose | ankane/pgvector 一键拉起 |
-
----
-
-## 4. 数据模型
-
-### 书籍表（Book）— 多租户容器
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| title | VARCHAR(100) | 书名，带索引 |
-| summary | TEXT | 大纲概要 |
-| created_at | TIMESTAMPTZ | 创建时间 |
-
-### 实体表（MemoryEntity）— 世界观词条字典
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| book_id | UUID FK | **物理隔离墙**，关联 books.id CASCADE |
-| entry_name | VARCHAR(255) | 词条名（如：张三） |
-| type | VARCHAR(50) | 类型（人物/地点/物品等），带索引 |
-| triggers | ARRAY[VARCHAR] | 触发词数组（如：["张三","三哥"]），GIN 索引 |
-| created_at | TIMESTAMPTZ | 创建时间 |
-| updated_at | TIMESTAMPTZ | 更新时间 |
-
-**唯一约束**：`(book_id, entry_name)` 联合唯一，同一本书内词条名不重复。
-
-### 事实表（MemoryFact）— 时间序列化的原子记忆
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| entity_id | UUID FK | 关联实体，CASCADE 删除 |
-| chapter_marker | INTEGER | **核心**：所属章节时间戳，带索引 |
-| content | TEXT | 原子化短句（如："右腿被打断"） |
-| embedding | VECTOR(1536) | 向量表示，用于消歧义和语义兜底 |
-| is_active | INTEGER | 软删除标记（1=活跃，0=失效） |
-| created_at | TIMESTAMPTZ | 创建时间 |
-
----
-
-## 5. 核心 API 契约
-
-### 5.1 预测性召回 `POST /api/memory/fetch`
-
-**用途**：写前获取设定字典
-
-**Request**:
-```json
-{
-  "book_id": "uuid-xxx",
-  "current_chapter": 5,
-  "extracted_triggers": ["张三", "三哥", "青云城"]
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": {
-    "found_entries": [
-      {
-        "entry_name": "张三",
-        "type": "人物",
-        "facts": [
-          { "content": "右腿被打断", "chapter_marker": 3 },
-          { "content": "拜入青云宗门", "chapter_marker": 4 }
-        ]
-      }
-    ],
-    "missing_entries": ["青云城"]
-  }
-}
-```
-
-**查询逻辑**（[`memory.py`](backend/app/routers/memory.py:16)）：
-- 单次 SQL 连表查询：`text()` 原生 SQL + `JOIN`
-- `me.book_id = CAST(:book_id AS uuid)` — **物理隔离锁死**
-- `me.triggers && :triggers` — PostgreSQL 原生 `&&` 数组重叠运算符，GIN 倒排索引极速命中
-- `mf.chapter_marker <= :chapter` — SQL 层面硬性切断未来记忆
-- `mf.is_active = true` — 屏蔽已失效事实
-- `set(extracted) - found_triggers_set` — 集合运算计算 missing_entries
-
-### 5.2 记忆沉淀 `POST /api/memory/commit`
-
-**用途**：写后追加新事实
-
-**Request**:
-```json
-{
-  "book_id": "uuid-xxx",
-  "chapter_marker": 6,
-  "entry_name": "青云城",
-  "triggers": ["青云城", "青云"],
-  "content": "位于大陆东部的修仙者聚集地",
-  "type": "地点"
-}
-```
-
-**行为**：幂等且追加。通过 `book_id + entry_name` 联合查询，不存在则自动创建实体。实体创建 + 事实追加在同一个 `db.commit()` 事务中完成。
-
-### 5.3 上帝之手 `PUT /api/memory/override`
-
-**用途**：作者人工纠偏
-
-**Request**:
-```json
-{
-  "book_id": "uuid-xxx",
-  "fact_id": "uuid-xxx",
-  "content": "修正后的事实内容",
-  "is_active": 0
-}
-```
-
-**行为**：直接修改指定 fact 的 content 或标记 is_active=0 软删除。
-
-### 5.4 时间线覆写 `POST /api/memory/{book_id}/rebuild/{chapter_number}`
-
-**用途**：当用户修改/重写某章内容后，抹除该章旧记忆并重新萃取新事实，防止"祖父悖论"（Grandfather Paradox）——AI 在后续章节中复活已死的角色。
-
-**Request**:
-```json
-{
-  "text": "修改后的章节全文..."
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "message": "Chapter 5 memory rebuilt."
-}
-```
-
-**执行流程**（[`memory.py`](backend/app/routers/memory.py:148)）：
-
-```
-1. DELETE MemoryFact WHERE book_id=? AND chapter_marker=?  — 抹除该章所有旧事实
-2. db.flush()
-3. 遍历该 book 下所有 MemoryEntity，检查是否还有剩余事实
-   └─ 无剩余事实 → db.delete(entity)  — 清理幽灵实体
-4. db.flush()
-5. extract_new_facts(req.text)  — 重新萃取新事实（LLM temperature=0.3）
-6. 对每个萃取结果：
-   └─ find-or-create MemoryEntity(book_id, entry_name)
-   └─ INSERT MemoryFact(entity_id, book_id, content, chapter_marker)
-7. db.commit()
-```
-
-**防御性设计**：
-- 全操作包裹在 `try/except` 中，任何异常触发 `db.rollback()`，绝不产生脏数据
-- 实体名超过 12 字符自动跳过（防 LLM 幻觉产生超长垃圾词条）
-- 萃取结果为空时仍正常 commit，返回 `"No new facts extracted."`
-- 非阻塞触发（前端 `fetch()` 无 `await`），不阻塞 UI
-
-### 5.5 SSE 流式生成 `POST /api/stream/generate`
-
-**用途**：五步闭环的流式推演接口，基于 SSE 协议，后端使用真实 AsyncOpenAI 客户端
-
-**Request**:
-```json
-{
-  "book_id": "uuid-xxx",
-  "chapter_marker": 1,
-  "plot_context": "张三冷笑一声，拔出了那把断剑...",
-  "extracted_triggers": ["张三", "血魔剑"]
-}
-```
-
-**Response**（`text/event-stream`）:
-
-```
-data: {"type": "status", "msg": "🔍 正在检索世界线记忆...", "step": "fetch"}
-data: {"type": "status", "msg": "命中设定: 2个 | 允许新造物: 1个", "found": [...], "missing": [...]}
-data: {"type": "status", "msg": "🧱 组装上帝视角法则...", "step": "inject"}
-data: {"type": "status", "msg": "✍️ 引擎推演中...", "step": "generate"}
-data: {"type": "chunk", "text": "张三"}
-data: {"type": "chunk", "text": "冷笑一声..."}
-data: {"type": "commit_done", "new_entities": [{"entry_name": "血魔剑", "type": "道具", "content": "..."}]}
-data: {"type": "done"}
-```
-
-**事件类型**：
-
-| type | 说明 |
-|------|------|
-| `status` | 状态机流转，驱动前端骨架屏 |
-| `chunk` | 打字机文本块，逐块上屏 |
-| `commit_done` | 写后提取结果，触发左栏新词条闪烁 |
-| `done` | 生成完成，归档到对话历史 |
-| `error` | 异常穿透，前端停止 Loading |
-
-**后端执行流程**（[`stream.py`](backend/app/routers/stream.py:28)）：
-
-```
-Phase 1&2 (Fetch): predict_fetch_memory(book_id=req.book_id, ...) — 真实数据库查询（物理隔离）
-Phase 3 (Inject):  build_injection_prompt() — 组装 System Prompt
-Phase 4 (Generate): stream_generate(system_prompt) — 真实 AsyncOpenAI 流式调用（temperature=0.8）
-Phase 5 (Commit):  extract_new_facts(full_text) — Markdown 剥离法提取（temperature=0.3）
-                   → find-or-create MemoryEntity(book_id=req.book_id) → append MemoryFact → db.commit()
-                   → background_tasks: run_compaction_task() — 异步 Memory GC
-```
-
-**防御性设计**：
-- `request.is_disconnected()` — 客户端断开立即终止生成，节省 Token
-- 强类型 Event 区分 — 前端精确控制骨架屏状态
-- 异常穿透 — 后端崩溃包装为 `{"type": "error"}` 吐给前端
-
-### 5.5 命运幽灵卡片 `POST /api/stream/suggest`
-
-**用途**：极速推演接口，根据近期上下文给出 3 个差异化剧情走向建议
-
-**Request**:
-```json
-{
-  "recent_context": "张三冷笑一声，拔出了那把断剑..."
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": ["遭遇血魔宗突袭", "发现剑中的神秘剑灵", "李四突然叛变"]
-}
-```
-
-**后端逻辑**（[`llm_client.py`](backend/app/llm_client.py:153)）：
-- `suggest_plot_directions(recent_context)` — temperature=0.8，Markdown 剥离法
-- 每个方向不超过 30 字，必须差异化（遇袭 / 发现线索 / 情感爆发）
-
-**前端交互**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue)）：
-- 输入框上方悬浮 ✨ 按钮 + 3 张幽灵卡片
-- 点击 ✨ 触发 `fetchPlotSuggestions()` → 骨架屏加载 → 卡片渲染
-- 点击卡片自动填入输入框（`useSuggestion()`），作者可微调后发送
-
-**智能拆包**（[`storyStore.js`](frontend/src/stores/storyStore.js:323)）：后端返回的 suggest 可能是 `{title, desc, conflict}` 对象而非纯字符串。`useSuggestion()` 自动检测类型：
-- 对象 → 拼接为 `【剧情分支】{title}：{desc}` 优质指令
-- 字符串 → `String()` 强制转换后直接填入
-- 彻底杜绝 `[object Object]` 显示在输入框
-
-### 5.6 命运幽灵卡片 `POST /api/stream/suggest`
-
-**用途**：极速推演接口，根据近期上下文给出 3 个差异化剧情走向建议
-
-**Request**:
-```json
-{
-  "recent_context": "张三冷笑一声，拔出了那把断剑..."
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": ["遭遇血魔宗突袭", "发现剑中的神秘剑灵", "李四突然叛变"]
-}
-```
-
-**后端逻辑**（[`llm_client.py`](backend/app/llm_client.py:153)）：
-- `suggest_plot_directions(recent_context)` — temperature=0.8，Markdown 剥离法
-- 每个方向不超过 30 字，必须差异化（遇袭 / 发现线索 / 情感爆发）
-
-**前端交互**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue)）：
-- 输入框上方悬浮 ✨ 按钮 + 3 张幽灵卡片
-- 点击 ✨ 触发 `fetchPlotSuggestions()` → 骨架屏加载 → 卡片渲染
-- 点击卡片自动填入输入框（`useSuggestion()`），作者可微调后发送
-
-**智能拆包**（[`storyStore.js`](frontend/src/stores/storyStore.js:323)）：后端返回的 suggest 可能是 `{title, desc, conflict}` 对象而非纯字符串。`useSuggestion()` 自动检测类型：
-- 对象 → 拼接为 `【剧情分支】{title}：{desc}` 优质指令
-- 字符串 → `String()` 强制转换后直接填入
-- 彻底杜绝 `[object Object]` 显示在输入框
-
-### 5.7 书架管理 `GET/POST/DELETE /api/books/`
-
-| 方法 | 路径 | 用途 |
-|------|------|------|
-| GET | `/api/books/` | 获取书架列表（按创建时间倒序） |
-| POST | `/api/books/` | 创建新书（title, summary） |
-| DELETE | `/api/books/{book_id}` | 删除书籍及所有关联记忆数据（级联：MemoryFact → MemoryEntity → Book） |
-
-**删除行为**（[`books.py`](backend/app/routers/books.py:89)）：
-- 先查询 Book 是否存在，不存在返回 404
-- 查询该 book_id 下所有 MemoryEntity.id
-- 逐条删除关联的 MemoryFact
-- 删除所有 MemoryEntity
-- 最后删除 Book
-- 单事务 `db.commit()` 原子提交
-
-**前端交互**（[`TheLibrary.vue`](frontend/src/views/TheLibrary.vue:44)）：
-- 每张书籍卡片 hover 时右上角显示 ✕ 删除按钮
-- 点击弹出 `confirm()` 对话框确认删除
-- 删除成功后 `storyStore.deleteBook()` 从 `bookshelf` 数组中移除该卡片
-
-### 5.8 灵感裂变 `POST /api/books/pitch`
-
-**用途**：根据种子文本裂变 3 个差异化灵感变体
-
-**Request**:
-```json
-{
-  "seed_text": "一个少年修仙的故事",
-  "is_variant": false,
-  "target_pitch": null
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": [
-    { "id": 1, "title": "...", "logline": "...", "showDetails": false },
-    { "id": 2, "title": "...", "logline": "...", "showDetails": false },
-    { "id": 3, "title": "...", "logline": "...", "showDetails": false }
-  ]
-}
-```
-
-**后端逻辑**（[`books.py`](backend/app/routers/books.py:53)）：
-- 提取 `X-LLM-*` 头部透传 BYOK 配置
-- 调用 `generate_pitches_from_llm()`（temperature=0.8）
-- 若返回空列表，抛出 `HTTPException(502)` 携带中文错误描述
-
-### 5.9 大纲生成 `POST /api/books/outline`
-
-**用途**：根据选定的灵感裂变结果生成完整大纲骨架
-
-**Request**:
-```json
-{
-  "pitch": { "title": "...", "logline": "...", ... }
-}
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": {
-    "outline_nodes": [
-      { "volume": 1, "title": "觉醒篇", "desc": "...", "status": "active" },
-      { "volume": 2, "title": "试炼篇", "desc": "...", "status": "pending" }
-    ],
-    "confirmed_settings": { "worldview": "...", "power_system": "..." }
-  }
-}
-```
-
-**后端逻辑**（[`books.py`](backend/app/routers/books.py:77)）：
-- 提取 `X-LLM-*` 头部透传 BYOK 配置
-- 调用 `generate_outline_from_llm()`（temperature=0.8）
-- 若返回空 `outline_nodes`，抛出 `HTTPException(502)` 携带中文错误描述
-
-**前端自动建书**（[`storyStore.js`](frontend/src/stores/storyStore.js:242)）：`generateOutline()` 成功后自动创建 Book 记录，将 `pitchId` 与 `bookId` 解耦。流程：`POST /api/books/outline` → 拿到大纲 → `POST /api/books/` 创建 Book → `setPhase('ide')`。彻底杜绝 `ForeignKeyViolationError`（此前因 `currentBookId = pitchId` 导致 memory 表外键指向不存在的 Book）。
-
-### 5.10 时光溯源重塑 `POST /api/stream/revise`
-
-**用途**：带上下文的章节重写与记忆重塑，支持指定改写范围
-
-**Request**:
-```json
-{
-  "book_id": "uuid-xxx",
-  "chapter_marker": 5,
-  "original_text": "原章节全文...",
-  "revision_prompt": "让张三在结尾觉醒血脉之力",
-  "extracted_triggers": ["张三", "血脉"]
-}
-```
-
-**Response**（`text/event-stream`）:
-```
-data: {"type": "status", "msg": "🔍 正在检索世界线记忆...", "step": "fetch"}
-data: {"type": "status", "msg": "🧱 组装上帝视角法则...", "step": "inject"}
-data: {"type": "status", "msg": "✍️ 时光溯源重塑中...", "step": "revise"}
-data: {"type": "chunk", "text": "改写后的文本..."}
-data: {"type": "done"}
-```
-
-**后端逻辑**（[`stream.py`](backend/app/routers/stream.py:160)）：
-- 调用 `predict_fetch_memory()` 获取当前章节前的所有设定
-- 组装 System Prompt（原文 + 改写指令 + 设定字典）
-- 调用 `stream_generate()` 流式输出改写结果
-- 改写完成后自动执行记忆提取与归档（Phase 5 Commit）
-
----
-
-## 6. 数据库索引策略
-
-```sql
--- 书籍表
-CREATE INDEX idx_book_title ON books (title);
-
--- 实体表
-CREATE UNIQUE INDEX uix_book_entry ON memory_entities (book_id, entry_name);
-CREATE INDEX idx_entity_book_id ON memory_entities (book_id);
-CREATE INDEX idx_entity_type ON memory_entities (type);
-CREATE INDEX idx_entity_triggers_gin ON memory_entities USING GIN (triggers);
-
--- 事实表
-CREATE INDEX idx_fact_entity_id ON memory_facts (entity_id);
-CREATE INDEX idx_fact_chapter ON memory_facts (chapter_marker);
-CREATE INDEX idx_fact_entity_chapter ON memory_facts (entity_id, chapter_marker);
-CREATE INDEX idx_fact_embedding ON memory_facts USING ivfflat (embedding vector_cosine_ops);
-```
-
----
-
-## 7. UI/UX 设计
-
-### 词条气泡：150ms 滞空时间法则（Grace Period）
-
-词条气泡使用 `<Teleport to="body">` + `position: fixed` 渲染，彻底规避 `overflow-y-auto` 裁剪问题。但 Teleport 将气泡移出胶囊的 DOM 层级后，鼠标离开胶囊到进入气泡之间存在**物理缝隙**，直接销毁气泡会导致 Race Condition。
-
-**解决方案**（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue:412)）：不铺隐形桥，而是用**时间差**。
-
-```
-胶囊 @mouseleave → setTimeout(150ms) → 销毁气泡
-气泡 @mouseenter → clearTimeout() → 取消销毁
-```
-
-核心三函数：
-
-| 函数 | 触发时机 | 行为 |
-|------|----------|------|
-| `showTooltip(event, entry)` | 胶囊 `@mouseenter` | 取消任何待销毁定时器，计算气泡位置（右侧优先，空间不足翻左侧，垂直居中不越界） |
-| `hideTooltip()` | 胶囊/气泡 `@mouseleave` | 设置 150ms 定时器，到期后销毁气泡 |
-| `keepTooltipAlive()` | 气泡 `@mouseenter` | 取消销毁定时器，气泡保持存活 |
-
-**智能定位**：`getBoundingClientRect()` 获取胶囊坐标，默认右侧 12px 间隙；右侧超出视口则翻转到左侧；垂直居中，上下边界各保留 8px 安全距离。箭头通过 `arrowRotation`（-45deg / 135deg）指示方向。
-
-### 四阶段漏斗收敛（Funnel Convergence）
-
-创作流程从发散到收敛，四个阶段由 [`storyStore.currentPhase`](frontend/src/stores/storyStore.js:5) 驱动：
+## 一、系统分层
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   书架大厅 (TheLibrary)                       │
-│  展示所有书籍卡片 → 点击进入 IDE / 新建进入 Pitch             │
-│  右上角 "⚙️ 引擎配置" 按钮（BYOK 配置入口）                   │
+│  前端层 (Frontend)                                           │
+│  Vue 3 + Vite + Pinia + Tailwind CSS                        │
+│  views/       — 页面级组件（TheLibrary, PitchRoom, ...）      │
+│  components/  — 可复用组件（EditorPanel, MemoryPanel, ...）   │
+│  stores/      — Pinia 状态管理（storyStore, settingsStore）   │
+│  api/         — API 调用封装（stream.js, memory.js）          │
 ├─────────────────────────────────────────────────────────────┤
-│                   灵感裂变室 (PitchRoom)                      │
-│  输入种子 → 裂变 3 个变体 → 选择骨架 → 进入大纲              │
+│  HTTP / SSE                                                  │
 ├─────────────────────────────────────────────────────────────┤
-│                   大纲锻造炉 (OutlineForge)                   │
-│  编辑卷/章节点 → 衍生新篇章 → 进入 IDE                      │
+│  后端层 (Backend)                                            │
+│  FastAPI + SQLAlchemy async + Pydantic                      │
+│  routers/     — API 路由（books, stream, memory, chat, ...）  │
+│  models/      — SQLAlchemy ORM 模型                          │
+│  schemas/     — Pydantic 请求/响应模型                        │
+│  app/ 根目录  — 核心逻辑（llm_client, prompt_engine, ...）    │
 ├─────────────────────────────────────────────────────────────┤
-│                   三栏创作 IDE (IDEWorkspace)                 │
-│  左栏: 设定字典  │  中栏: 剧本渲染  │  右栏: 世界大纲        │
-│  顶栏: "⚙️ 偏好设定" 按钮（BYOK 配置入口）                   │
+│  AI 引擎层 (LLM)                                             │
+│  OpenAI-compatible API（DeepSeek / 中转站）                   │
+│  llm_client.py — 统一 LLM 调用入口（含 Embedding API）        │
+│  prompt_engine.py — Prompt 模板组装 + Token 截断             │
+├─────────────────────────────────────────────────────────────┤
+│  数据层 (Database)                                           │
+│  PostgreSQL 16 + pgvector                                    │
+│  7 张业务表 + 向量检索（全部物理 FK CASCADE）                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 三栏式 IDE 布局（[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue)）
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 顶栏：青羽·织梦引擎 IDE  | 状态指示灯 | ⚙️ 偏好设定 | 导出剧本 │
-├──────────┬──────────────────────────────────┬──────────────┤
-│ 左栏     │ 中栏                             │ 右栏         │
-│ 设定字典  │ 剧本渲染与共创区                   │ 世界大纲      │
-│ (280px)  │ (1fr)                            │ (280px)      │
-│          │                                   │              │
-│ 人物     │ [状态机骨架屏]                      │ 第1卷：觉醒篇 │
-│ 张三     │  🔍 检索世界线记忆 ✓               │ 第2卷：试炼篇 │
-│ 李四     │  🧱 组装上帝视角法则 ✓              │ 第3卷：血魔乱 │
-│          │  ✍️ 引擎推演中...                  │              │
-│ 地点     │ [打字机流式文本]                    │              │
-│ 青云城   │ 张三冷笑一声，拔出了那把断剑...      │              │
-│          │                                   │              │
-│          │ [对话历史]                         │              │
-│          │                                   │              │
-│          ├──────────────────────────────────┤              │
-│          │ 输入框 [Ctrl+Enter 生成] [停止]    │              │
-└──────────┴──────────────────────────────────┴──────────────┘
-```
-
-### 全局状态神经中枢（Pinia Stores）
-
-| Store | 职责 | 关键状态 |
-|-------|------|----------|
-| [`memoryStore`](frontend/src/stores/memoryStore.js) | 左栏灵魂 — 记忆数据管理 | `entities`（按人物/地点/道具/事件分组）、`newlyAddedIds`（闪烁驱动）、`isLoading` |
-| [`storyStore`](frontend/src/stores/storyStore.js) | 全流程灵魂 — 阶段路由 + 多书管理 + 剧情流转 | `currentPhase`（library/pitch/outline/ide）、`currentBookId`、`bookshelf[]`、`promptSeed`、`pitches[]`、`selectedPitch`、`currentChapter`、`currentVolume`、`outlineNodes[]`（active/pending/completed）、`chatHistory[]` |
-| [`editor`](frontend/src/stores/editor.js) | 编辑器辅助状态 | `conversationHistory[]`、`appendGenerated()` |
-| [`settingsStore`](frontend/src/stores/settingsStore.js) | BYOK 配置 — LLM 密钥/地址/模型 | `isOpen`（面板开关）、`apiKey`、`baseUrl`、`model`（localStorage 持久化） |
-
-### 数据流架构
-
-```
-书架选择 (TheLibrary)
-    ↓ openBook(bookId) / startNewBook()
-storyStore.currentBookId = bookId
-
-用户输入 (中栏底部)
-    ↓ Ctrl+Enter
-startGeneration({book_id, chapter_marker, plot_context, extracted_triggers}, handlers)
-    ↓ POST /api/stream/generate（携带 X-LLM-* 头部）
-后端 SSE Event Generator
-    ↓
-onMessage({type:'status', step:'fetch'})  ←──  Phase 1&2: Fetch (predict_fetch_memory, book_id 隔离)
-    ↓ memoryStore.isLoading = true
-onMessage({type:'status', step:'inject'}) ←──  Phase 3: Inject (build_injection_prompt)
-onMessage({type:'status', step:'generate'}) ←  Phase 4: Generate (stream_generate, real LLM)
-onMessage({type:'chunk', text})  ←── 打字机逐字上屏  Phase 4 (流式)
-onMessage({type:'commit_done'})  ←── memoryStore.addNewFact() → 左栏闪烁  Phase 5: Commit + Memory GC
-onMessage({type:'done'})         ←── storyStore.appendChat() → 对话历史归档
-```
-
 ---
 
-## 8. 项目结构
+## 二、目录结构
 
 ```
 rag-memory-system/
-├── docker-compose.yml           # pgvector 容器化一键启动
-├── README.md                    # 快速启动指南
-├── ARCHITECTURE.md              # 本文件：核心架构蓝图
+├── docker-compose.yml          # PostgreSQL + pgvector 容器
+├── ARCHITECTURE.md             # 本文档
 ├── backend/
-│   ├── .env                     # LLM 密钥/地址/模型配置（后备，优先使用前端 BYOK）
-│   ├── requirements.txt
-│   ├── alembic/
-│   │   └── env.py               # 迁移配置（已引入 pgvector.sqlalchemy）
+│   ├── requirements.txt        # 依赖（含 tiktoken）
+│   ├── alembic/                # 数据库迁移（001~004）
+│   │   └── versions/
 │   └── app/
-│       ├── main.py              # FastAPI 入口，挂载路由 + CORS
-│       ├── config.py            # 配置（数据库连接、embedding 维度等）
-│       ├── database.py          # SQLAlchemy async 引擎 & Session
-│       ├── llm_client.py        # AsyncOpenAI 动态客户端：extract_json_from_markdown() + get_dynamic_client() + stream_generate() + extract_new_facts() + compact_old_facts() + suggest_plot_directions() + generate_pitches_from_llm() + generate_outline_from_llm() + _translate_llm_error()
-│       ├── memory_compactor.py  # 后台 Memory GC：阈值触发 → LLM 炼化 → 软删除旧事实 + 插入压缩事实
-│       ├── prompt_engine.py     # 上下文注入 Prompt 组装
-│       ├── extraction_engine.py # 写后提取 Prompt 组装 + 结果解析（备用）
-│       ├── orchestrator.py      # 编排层（预留）
-│       ├── models/
-│       │   ├── book.py          # Book 表模型（多租户容器）
-│       │   ├── entity.py        # MemoryEntity 表模型（含 book_id FK + 联合唯一约束）
-│       │   ├── fact.py          # MemoryFact 表模型（含 VECTOR 列）
-│       │   ├── pitch.py         # StoryPitch 表模型（灵感裂变持久化）
-│       │   ├── outline.py       # StoryOutlineNode 表模型（大纲节点持久化）
-│       │   ├── chapter.py       # StoryChapter 表模型（章节内容持久化）
-│       │   ├── chat.py          # StoryChatMessage 表模型（对话历史持久化）
-│       │   └── apiconfig.py     # ApiConfig 表模型（设置持久化）
-│       ├── schemas/
-│       │   ├── fetch.py         # POST /fetch 请求/响应 Pydantic 模型（含 book_id）
-│       │   ├── commit.py        # POST /commit 请求模型（含 book_id）
-│       │   ├── override.py      # PUT /override 请求模型（含 book_id）
-│       │   ├── pitch.py         # 灵感裂变请求/响应模型
-│       │   └── outline.py       # 大纲请求/响应模型
-│       └── routers/
-│           ├── books.py         # 书架管理：GET/POST/DELETE /api/books/ + POST /pitch + POST /outline
-│           ├── memory.py        # 核心 API：fetch / commit / override / rebuild（book_id 物理隔离 + 时间线覆写）
-│           ├── stream.py        # SSE 流式生成路由（五步闭环 + BackgroundTasks GC）+ POST /suggest 幽灵卡片 + POST /revise 时光溯源重塑（提取 X-LLM-* 头部，错误中文翻译）
-│           ├── ui.py            # UI 数据接口：entities / facts / chapters（book_id 过滤）
-│           ├── pitch.py         # 灵感裂变接口
-│           ├── outline.py       # 大纲生成接口
-│           ├── chapters.py      # 章节内容持久化：POST /api/chapters/save + GET /api/chapters/list
-│           ├── chat.py          # 对话历史持久化：POST /api/chat/save + GET /api/chat/list
-│           └── settings.py      # 设置持久化：POST /api/settings/save + GET /api/settings/load
+│       ├── __init__.py
+│       ├── main.py             # FastAPI 入口 + CORS + lifespan
+│       ├── config.py           # 配置（Settings）
+│       ├── database.py         # 异步引擎 + session 工厂
+│       ├── llm_client.py       # LLM 调用（流式/非流式 + Embedding API + 记忆融合引擎）
+│       ├── prompt_engine.py    # Prompt 模板 + Token 截断（tiktoken）
+│       ├── memory_compactor.py # 记忆压缩（后台任务，阈值 30 条）
+│       ├── orchestrator.py     # 编排逻辑（旧，部分废弃）
+│       ├── models/             # SQLAlchemy ORM（全部物理 FK CASCADE）
+│       │   ├── __init__.py
+│       │   ├── book.py         # books 表
+│       │   ├── pitch.py        # story_pitches 表
+│       │   ├── outline.py      # story_outline_nodes 表
+│       │   ├── chapter.py      # story_chapters 表
+│       │   ├── chat.py         # story_chat_messages 表
+│       │   ├── entity.py       # memory_entities 表
+│       │   ├── fact.py         # memory_facts 表（含 embedding 向量列）
+│       │   └── apiconfig.py    # API 配置持久化
+│       ├── schemas/            # Pydantic 模型
+│       │   ├── __init__.py
+│       │   ├── pitch.py
+│       │   ├── outline.py
+│       │   ├── fetch.py        # FetchRequest（含 query_text）
+│       │   ├── commit.py
+│       │   └── override.py
+│       └── routers/            # API 路由
+│           ├── __init__.py
+│           ├── books.py        # 书籍 CRUD + 灵感 + 大纲
+│           ├── stream.py       # SSE 生成 + 修订（含断连抢救）
+│           ├── pitch.py        # Pitch 独立 CRUD
+│           ├── outline.py      # Outline 独立 CRUD
+│           ├── chapters.py     # 章节持久化
+│           ├── chat.py         # 聊天记录
+│           ├── memory.py       # 记忆检索/提交/重塑（RAG v2 混合检索）
+│           ├── ui.py           # UI 数据查询
+│           └── settings.py     # API 配置
 └── frontend/
     ├── index.html
-    ├── vite.config.js           # Vite + Vue3 + API 代理
-    ├── package.json             # Vue3 + Pinia + Tailwind CSS v4 依赖
-    ├── tailwind.config.js       # Tailwind CSS v4 配置（content 扫描路径）
-    ├── postcss.config.js        # PostCSS 插件配置（@tailwindcss/postcss + autoprefixer）
+    ├── vite.config.js
+    ├── tailwind.config.js
+    ├── postcss.config.js
+    ├── package.json
     └── src/
-        ├── main.js              # 入口，createPinia() 注入
-        ├── App.vue              # 四阶段 Transition 路由：TheLibrary → PitchRoom → OutlineForge → IDEWorkspace（挂载 SettingsModal）
-        ├── style.css            # Tailwind v4 入口 @import "tailwindcss" + 自定义滚动条 + 动画
+        ├── main.js
+        ├── App.vue
+        ├── style.css
         ├── api/
-        │           ├── memory.js        # 封装 /fetch /commit /override /rebuild /entities /facts /chapters（全部携带 book_id + X-LLM-* 头部）
-        │   └── stream.js        # SSE 客户端（fetch + ReadableStream + AbortController）+ fetchSuggestions()（携带 X-LLM-* 头部）
+        │   ├── stream.js       # SSE 流式请求
+        │   └── memory.js       # 记忆 API
         ├── stores/
-        │   ├── memoryStore.js   # 左栏灵魂：entities 分组 + newlyAddedIds 闪烁
-        │   ├── storyStore.js    # 全流程灵魂：书架管理 + 阶段路由 + 剧情流转 + 对话历史
-        │   ├── settingsStore.js # BYOK 配置：apiKey/baseUrl/model（localStorage 持久化）
-        │   └── editor.js        # 编辑器辅助状态
+        │   ├── storyStore.js   # 核心状态（书/灵感/大纲/章节）
+        │   ├── settingsStore.js# 引擎配置
+        │   ├── memoryStore.js  # 记忆面板状态
+        │   ├── memory.js       # ⚠️ 废弃，待清理
+        │   ├── editor.js       # ⚠️ 废弃，待清理
+        │   └── storyFlow.js    # ⚠️ 废弃，待清理
         ├── views/
-        │   ├── TheLibrary.vue   # Phase 0：书架大厅（网格卡片 + 新建/选书 + ⚙️ 引擎配置）
-        │   ├── PitchRoom.vue    # Phase 1：灵感裂变室（Midjourney 风格 U/V 网格）
-        │   ├── OutlineForge.vue # Phase 2：大纲锻造炉（可编辑时间线）
-        │   └── IDEWorkspace.vue # Phase 3：三栏式 IDE 骨架 + SSE 流式接入 + ⚙️ 偏好设定 + 词条气泡 150ms 滞空
+        │   ├── TheLibrary.vue      # 书架大厅
+        │   ├── PitchRoom.vue       # 灵感裂变室
+        │   ├── OutlineForge.vue    # 大纲锻造
+        │   └── IDEWorkspace.vue    # 共创 IDE（主工作区）
         └── components/
-            ├── MemoryExplorer.vue   # 记忆资源管理器
-            ├── EditorPanel.vue      # 编辑器面板（打字机渲染 + 对话历史 + 幽灵卡片 + 输入框）
-            ├── OutlineNavigator.vue # 大纲导航（卷/章节点树 + 状态标记）
-            ├── MemoryPanel.vue      # 右侧"当前激活记忆"面板（含骨架屏）
-            ├── TimeSlider.vue       # 时空穿梭滑块（300ms 防抖）
-            ├── FactTooltip.vue      # 悬停弹出事实气泡（Teleport + 动效）
-            └── SettingsModal.vue    # BYOK 配置模态框（玻璃拟态，三个输入框 + 连接引擎按钮）
+            ├── SettingsModal.vue    # 引擎配置弹窗
+            ├── EditorPanel.vue     # ⚠️ 编辑器面板（旧，部分废弃）
+            ├── MemoryPanel.vue     # 记忆面板
+            ├── MemoryExplorer.vue  # 记忆资源管理器
+            ├── OutlineNavigator.vue# 大纲导航
+            ├── FactTooltip.vue     # 事实气泡
+            └── TimeSlider.vue      # 时间轴滑块
 ```
 
 ---
 
-## 9. BYOK 架构：动态 LLM 注入器（Bring Your Own Key）
+## 三、数据模型
 
-### 设计动机
-
-传统方案将 API Key 硬编码在后端 `.env`，存在致命缺陷：
-- 用户首次打开前端看到黑屏，必须手动编辑后端文件才能使用
-- 多用户场景下密钥无法隔离
-- 切换模型/提供商需要重启后端
-
-BYOK 架构将 LLM 配置权交还给用户，通过前端面板配置，经 HTTP 头部透传，后端动态实例化客户端。
-
-### 数据流
+### 3.1 ER 关系
 
 ```
-用户打开 TheLibrary / IDEWorkspace
-    ↓ 点击 "⚙️ 引擎配置" / "⚙️ 偏好设定"
-SettingsModal.vue 弹出（玻璃拟态面板）
-    ↓ 填入 Base URL / Model / API Key → 点击 "连接引擎"
-settingsStore.saveSettings(key, url, mod)
-    ↓ localStorage.setItem('llm_*') 持久化
-    ↓ settingsStore.isOpen = false 关闭面板
+books (1) ─────< story_pitches (N)      # 一本书有多个灵感（FK CASCADE）
+books (1) ─────< memory_entities (N)    # 一本书有多个记忆实体（FK CASCADE）
+books (1) ─────< memory_facts (N)       # 一本书有多个记忆事实（FK CASCADE）
+books (1) ─────< story_chapters (N)     # 一本书有多个章节（FK CASCADE）
+books (1) ─────< story_chat_messages (N)# 一本书有多个聊天记录（FK CASCADE）
 
-后续所有 API 请求：
-    ↓ llmHeaders() 从 settingsStore 读取配置
-    ↓ 注入 HTTP 头部：X-LLM-API-Key / X-LLM-Base-URL / X-LLM-Model
-    ↓ POST /api/stream/generate（携带头部）
-
-后端 stream.py 路由：
-    ↓ request.headers.get("X-LLM-API-Key") 提取
-    ↓ get_dynamic_client(api_key, base_url) 创建 per-request AsyncOpenAI 实例
-    ↓ 调用 stream_generate(system_prompt, api_key, base_url, model_name)
+story_pitches (1) ─────< story_outline_nodes (N)  # 一个灵感有多个大纲节点（FK CASCADE）
 ```
 
-### 前端配置面板
+### 3.2 核心表结构
 
-[`SettingsModal.vue`](frontend/src/components/SettingsModal.vue) — 玻璃拟态模态框：
-- **Base URL**：默认 `https://api.deepseek.com`
-- **Model**：默认 `deepseek-chat`
-- **API Key**：password 模式输入，不可见
-- **连接引擎**按钮：调用 `settingsStore.saveSettings()`
+| 表 | 关键字段 | 用途 |
+|----|---------|------|
+| [`books`](rag-memory-system/backend/app/models/book.py) | `id`, `title`, `summary`, `custom_prompt`, `created_at` | 书籍元数据 + 文风约束 |
+| [`story_pitches`](rag-memory-system/backend/app/models/pitch.py) | `id`, `book_id`(nullable), `seed_text`, `variant_of`, `title`, `summary`, `tone`, `created_at` | 灵感卡片 |
+| [`story_outline_nodes`](rag-memory-system/backend/app/models/outline.py) | `id`, `pitch_id`, `volume_number`, `title`, `core_goal`, `emotion_curve`, `location`, `estimated_chapters`, `sort_order`, `status` | 大纲卷节点 |
+| [`story_chapters`](rag-memory-system/backend/app/models/chapter.py) | `id`, `book_id`, `volume_number`, `chapter_marker`, `title`, `content`, `created_at` | 已生成的章节正文 |
+| [`story_chat_messages`](rag-memory-system/backend/app/models/chat.py) | `id`, `book_id`, `role`, `type`, `volume_number`, `content`, `created_at` | 聊天记录（含分割线） |
+| [`memory_entities`](rag-memory-system/backend/app/models/entity.py) | `id`, `book_id`, `entry_name`, `type`, `triggers`(ARRAY) | 记忆实体（人物/地点/物品等） |
+| [`memory_facts`](rag-memory-system/backend/app/models/fact.py) | `id`, `entity_id`, `book_id`, `chapter_marker`, `content`, `embedding`(vector), `is_active`(Integer: 0/1) | 记忆事实（带向量用于 RAG） |
 
-### 前端 Store
+---
 
-[`settingsStore.js`](frontend/src/stores/settingsStore.js) — Pinia + localStorage 持久化：
+## 四、API 路由
 
-```javascript
-state: () => ({
-  isOpen: false,
-  apiKey: localStorage.getItem('llm_api_key') || '',
-  baseUrl: localStorage.getItem('llm_base_url') || 'https://api.deepseek.com',
-  model: localStorage.getItem('llm_model') || 'deepseek-chat',
-})
+### 4.1 书籍管理 — [`routers/books.py`](rag-memory-system/backend/app/routers/books.py)
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| GET | `/api/books/` | 列出所有书籍 |
+| GET | `/api/books/{book_id}` | 获取单本书详情（含文风约束） |
+| POST | `/api/books/` | 创建书籍（回写 pitch.book_id） |
+| PUT | `/api/books/{book_id}/custom_prompt` | 更新文风约束 |
+| DELETE | `/api/books/{book_id}` | 删除书籍（FK CASCADE 自动清理子表） |
+| DELETE | `/api/books/clean/all` | 清空全部数据（调试用） |
+
+### 4.2 灵感 & 大纲 — [`routers/books.py`](rag-memory-system/backend/app/routers/books.py)
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| POST | `/api/books/pitch` | LLM 生成灵感（始终持久化） |
+| POST | `/api/books/outline` | LLM 生成大纲（需 pitch_id） |
+
+### 4.3 独立 CRUD — [`routers/pitch.py`](rag-memory-system/backend/app/routers/pitch.py) / [`routers/outline.py`](rag-memory-system/backend/app/routers/outline.py)
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| POST | `/api/pitch/create` | 创建 Pitch |
+| GET | `/api/pitch/list` | 列出所有 Pitch |
+| PUT | `/api/pitch/select` | 选中 Pitch |
+| POST | `/api/outline/create` | 创建大纲节点 |
+| GET | `/api/outline/list/{pitch_id}` | 按 Pitch 列出大纲 |
+| GET | `/api/outline/by-book/{book_id}` | 按 Book 列出大纲 |
+| PUT | `/api/outline/update/{node_id}` | 更新大纲节点 |
+
+### 4.4 流式生成 — [`routers/stream.py`](rag-memory-system/backend/app/routers/stream.py)
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| POST | `/api/stream/generate` | SSE 流式生成章节正文 |
+| POST | `/api/stream/revise` | SSE 流式修订章节 |
+| POST | `/api/stream/suggest` | 获取剧情建议 |
+
+### 4.5 记忆系统 — [`routers/memory.py`](rag-memory-system/backend/app/routers/memory.py)
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| POST | `/api/memory/fetch` | RAG 检索记忆 |
+| POST | `/api/memory/commit` | 提交新记忆 |
+| PUT | `/api/memory/override` | 覆写事实 |
+| POST | `/api/memory/{book_id}/rebuild/{chapter_number}` | 章节重写后重塑记忆 |
+
+### 4.6 其他
+
+| 方法 | 路径 | 文件 | 用途 |
+|------|------|------|------|
+| POST | `/api/chapters/save` | [`chapters.py`](rag-memory-system/backend/app/routers/chapters.py) | 保存章节 |
+| POST | `/api/chat/save` | [`chat.py`](rag-memory-system/backend/app/routers/chat.py) | 保存聊天记录 |
+| GET | `/api/ui/entities` | [`ui.py`](rag-memory-system/backend/app/routers/ui.py) | 查询实体列表 |
+| GET | `/api/ui/facts` | [`ui.py`](rag-memory-system/backend/app/routers/ui.py) | 查询事实列表 |
+| GET | `/api/ui/chapters` | [`ui.py`](rag-memory-system/backend/app/routers/ui.py) | 查询章节列表 |
+| GET/PUT | `/api/settings/` | [`settings.py`](rag-memory-system/backend/app/routers/settings.py) | API 配置管理 |
+
+---
+
+## 五、核心流程
+
+### 5.1 灵感 → 大纲 → 写作（三阶段）
+
+```
+PitchRoom          OutlineForge          IDEWorkspace
+─────────          ────────────          ───────────
+输入种子文本
+  → POST /pitch
+  → LLM 返回 3 个灵感
+  → 展示卡片列表
+       ── 用户选择一个 ──→
+                          生成大纲
+                            → POST /outline
+                            → LLM 返回多卷大纲
+                            → 展示卷列表
+                                 ── 用户点"进入IDE" ──→
+                                                       创建 Book（回写 pitch_id）
+                                                       加载大纲 + 章节 + 聊天记录
+                                                       自动生成第一章
 ```
 
-### HTTP 头部透传
-
-所有前端 API 调用（[`stream.js`](frontend/src/api/stream.js)、[`memory.js`](frontend/src/api/memory.js)）通过 `llmHeaders()` 注入三个自定义头部：
+### 5.2 SSE 生成流程
 
 ```
-X-LLM-API-Key: sk-xxxxx
-X-LLM-Base-URL: https://api.deepseek.com
-X-LLM-Model: deepseek-chat
+POST /api/stream/generate
+  │
+  ├─ [fetch]    RAG v2 混合检索（3 路径）
+  │   ├─ Path A: query_text → Embedding API → cosine_distance（Top 15）
+  │   ├─ Path B: extracted_triggers → triggers && 数组重叠（legacy 回退）
+  │   └─ Path C: 空查询 → 全量返回（graceful degradation）
+  │
+  ├─ [inject]   组装 system_prompt
+  │   ├─ header（固定指令 + 🔒 阶段锁定：进度坐标 + 视界锁定 + 节奏纪律）
+  │   ├─ pitch_section（核心创意）
+  │   ├─ outline_section（大纲路线 + [<<< 当前所在卷，绝对聚焦于此 >>>] 注意力锚点）
+  │   ├─ facts_section（RAG 记忆事实）
+  │   ├─ missing_section（新造物授权）
+  │   ├─ scene_section（当前场景 — 最高优先级）
+  │   └─ Token 截断：tiktoken 计数 → 4 阶段裁剪（阈值 6000）
+  │       ├─ 第一刀：RAG facts Top 15 → Top 5
+  │       ├─ 第二刀：Outline 截断到 2000 tokens
+  │       ├─ 第三刀：Pitch 截断到 1000 tokens
+  │       └─ 第四刀：RAG facts 终极砍到 Top 3
+  │       （custom_prompt + current_scene 永不裁剪）
+  │
+  ├─ [generate] LLM 流式返回文本 chunks → SSE 推送到前端
+  │
+  ├─ [commit]   💡 记忆融合引擎 — 提取新实体/事实 → 状态机覆盖更新
+  │   ├─ LLM 提取新实体列表（entry_name + type + triggers + content）
+  │   ├─ 对每个实体：
+  │   │   ├─ 新实体 → 创建 MemoryEntity + MemoryFact(is_active=1)
+  │   │   └─ 已有实体 → 查询当前 is_active=1 事实
+  │   │       ├─ 存在 → 调用 consolidate_entity_profile() 融合旧设定+新情报
+  │   │       │   ├─ 旧事实 is_active=0（归档）
+  │   │       │   └─ 创建新事实 is_active=1 + embedding
+  │   │       └─ 不存在 → 直接创建新事实 is_active=1
+  │   ├─ 别名合并：新 triggers 去重合并到 entity.triggers
+  │   ├─ 12 字符幻觉防护：content < 12 字符则跳过
+  │   └─ 为每个新 MemoryFact 调用 Embedding API 生成向量
+  │
+  ├─ [done]     前端保存章节 → 2s 后刷新记忆面板
+  │
+  └─ [断连抢救] 客户端断开时 finally 块自动保存半成品为草稿（volume=0）
 ```
 
-### 后端动态客户端
+### 5.3 修订流程
 
-[`llm_client.py`](backend/app/llm_client.py:38) 移除全局 `AsyncOpenAI()` 实例，改为 `get_dynamic_client()`：
+```
+POST /api/stream/revise
+  │
+  ├─ 获取目标章节 + 前后文
+  ├─ LLM 重写章节内容 → SSE 推送
+  ├─ 用户预览修订结果
+  └─ 用户确认 → 覆盖章节 + POST /api/memory/{id}/rebuild 重塑记忆
+```
+
+---
+
+## 六、技术选型与关键决策
+
+| 维度 | 选型 | 理由 |
+|------|------|------|
+| 前端框架 | Vue 3 + Vite | 轻量、响应式、组合式 API |
+| 状态管理 | Pinia | 官方推荐，TypeScript 友好 |
+| 样式 | Tailwind CSS | 原子化 CSS，快速迭代 UI |
+| 后端框架 | FastAPI | 异步原生、自动 OpenAPI、Pydantic 校验 |
+| ORM | SQLAlchemy async | 异步数据库操作，避免阻塞事件循环 |
+| 数据库 | PostgreSQL 16 + pgvector | 向量检索（RAG 记忆召回） |
+| LLM 协议 | OpenAI-compatible API | 兼容 DeepSeek / 中转站 / 任意 OpenAI 代理 |
+| 流式传输 | Server-Sent Events | 单向实时推送，比 WebSocket 轻量 |
+| 容器化 | Docker Compose | 仅数据库容器化，后端/前端本地运行 |
+
+### 关键架构决策
+
+1. **Pitch 先于 Book**：灵感可以在没有 Book 时独立存在（`book_id` 可为 NULL），创建 Book 后回写。这允许用户在确定书名之前先探索创意方向。
+
+2. **SSE 而非 WebSocket**：生成是单向流（服务器→客户端），不需要双向通信。SSE 基于 HTTP，无需额外协议握手，与 FastAPI 的 `StreamingResponse` 天然契合。
+
+3. **记忆 RAG v2（混合检索）**：废除旧版正则提取触发词 + 数组重叠匹配。新版流程：
+   - 前端直接传入用户输入的原始文本 `query_text`
+   - 后端调用 Embedding API 将其转为向量
+   - 使用 pgvector `cosine_distance` 进行语义相似度搜索（Top 15）
+   - 写入新记忆时同步生成 embedding 存入数据库
+   - Embedding API 失败时自动降级为全量返回（graceful degradation）
+
+4. **文风约束随身带**：`custom_prompt` 存储在 `books` 表，每次生成请求都透传给 LLM，确保整本书风格一致。
+
+5. **记忆压缩阈值 30 条**：`memory_compactor.py` 中 `COMPACTION_THRESHOLD = 30`，长篇小说重要角色 30 条设定以内不触发压缩，避免过早丢失细节。
+
+6. **🧠 记忆融合引擎（Memory Consolidation）**：废除 Append-Only 逐章追加模式，改为 **One Entity = One Active Profile** 状态机。每个实体在任何时刻只有 1 条 `is_active=1` 的事实。新章节产生新情报时：
+   - 查询该实体当前 `is_active=1` 的旧设定卡
+   - 调用 LLM `consolidate_entity_profile()` 将旧设定 + 新情报融合为一份精炼词条
+   - 旧事实 `is_active=0`（归档），新事实 `is_active=1` + embedding
+   - 这避免了角色词条随章节数线性膨胀，将每个实体的活跃记忆控制在 LLM 可消化的范围内。
+
+7. **🚫 实体消歧（Entity Fragmentation Fix）**：LLM 提取新实体时，System Prompt 中加入：
+   - **代词封杀**：禁止将"我/你/他/她/它/自己/这/那"作为 `entry_name`
+   - **强制别名合并**：同一实体的不同称呼（如"林墨/哥哥/林哥哥"）必须合并为同一条记录，triggers 数组收集所有别名
+   - 这解决了 LLM 将同一角色的不同称呼识别为多个独立实体的"实体分裂"问题。
+
+8. **🔒 阶段锁定架构（Stage-Lock）**：防止 LLM 跨越当前卷宗边界提前撰写后续剧情。实现方式：
+   - `StreamGenRequest` 携带 `current_volume` 字段
+   - Prompt header 注入【当前进度坐标】和【视界锁定与节奏纪律】3 条铁律
+   - Outline 章节中当前卷标题后追加 `[<<< 当前所在卷，绝对聚焦于此 >>>]` 注意力锚点
+   - 这解决了 LLM"剧情早泄"（Plot Rushing）问题，确保叙事节奏可控。
+
+### 钛合金钢板（层间契约修复）
+
+> 以下三项修复于 2026-06-22 统一实施，解决架构师评审中发现的 3 根"软肋"。
+
+#### 第一根：物理外键 ON DELETE CASCADE
+
+**问题**：ORM 模型定义了 `ForeignKey("books.id", ondelete="CASCADE")`，但 Alembic 迁移 `002_add_foreign_key_cascades.py` 从未执行，数据库中 3 张子表无物理 FK 约束。删除 Book 时，关联的 `story_chapters`、`story_chat_messages`、`story_outline_nodes` 成为孤儿数据。
+
+**修复**：通过 `004_enforce_physical_fk_cascades.py` 迁移脚本（直接 SQL 执行）为以下 3 表添加物理 FK：
+
+```sql
+ALTER TABLE story_chapters ADD CONSTRAINT fk_chapter_book FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE;
+ALTER TABLE story_chat_messages ADD CONSTRAINT fk_chat_book FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE;
+ALTER TABLE story_outline_nodes ADD CONSTRAINT fk_outline_pitch FOREIGN KEY (pitch_id) REFERENCES story_pitches(id) ON DELETE CASCADE;
+```
+
+**效果**：删除 Book 时，PostgreSQL 自动级联删除所有关联章节、聊天记录；删除 Pitch 时自动级联删除所有大纲节点。应用层不再需要手动逐表清理。
+
+#### 第二根：SSE 断连抢救
+
+**问题**：客户端在网络抖动或用户关闭页面时断开 SSE 连接，`event_generator()` 协程被取消，已生成但尚未保存的半成品正文直接蒸发。
+
+**修复**：在 [`stream.py`](rag-memory-system/backend/app/routers/stream.py) 的 `event_generator()` 中添加 `finally` 块：
 
 ```python
-def get_dynamic_client(api_key: str = None, base_url: str = None):
-    final_key = api_key or os.getenv("LLM_API_KEY")
-    final_url = base_url or os.getenv("LLM_BASE_URL")
-    if not final_key:
-        raise ValueError("未配置 API Key。请在前端面板设置，或在后端 .env 中配置。")
-    return AsyncOpenAI(api_key=final_key, base_url=final_url)
+finally:
+    if full_text and len(full_text) > 50:
+        # 检查是否已有该章节（避免重复覆盖）
+        existing = await db.execute(
+            select(StoryChapter).where(
+                StoryChapter.book_id == uuid.UUID(req.book_id),
+                StoryChapter.chapter_marker == req.chapter_marker
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is None:
+            draft_chapter = StoryChapter(
+                book_id=uuid.UUID(req.book_id),
+                volume_number=0,  # volume=0 标记为草稿
+                chapter_marker=req.chapter_marker,
+                title=f"第{req.chapter_marker}章（断线草稿）",
+                content=full_text
+            )
+            db.add(draft_chapter)
+            await db.commit()
 ```
 
-所有七个 LLM 函数（`extract_json_from_markdown`、`stream_generate`、`extract_new_facts`、`compact_old_facts`、`suggest_plot_directions`、`generate_pitches_from_llm`、`generate_outline_from_llm`）均接受 `api_key`、`base_url`、`model_name` 可选参数。若未传入，回退到 `.env` 环境变量。
+**设计要点**：
+- `volume_number=0` 作为草稿标记，前端可据此区分正式章节与断线草稿
+- 先查重再写入，避免重复保存
+- 落库失败仅 rollback 不抛异常，不影响主流程
 
-### 入口点
+#### 第三根：Token 截断
 
-- **TheLibrary.vue**：右上角 "⚙️ 引擎配置" 按钮（用户首次打开即见）；hover 显示 ✕ 删除按钮
-- **IDEWorkspace.vue**：顶栏 "⚙️ 偏好设定" 按钮（IDE 内快速切换）
-- **App.vue**：全局挂载 `<SettingsModal />`，所有阶段均可弹出
+**问题**：当 Pitch 较长 + 完整多卷 Outline + Top 15 RAG 事实同时注入 Prompt 时，总 token 数可能超过 LLM 上下文窗口（如 DeepSeek 的 8K/32K 限制），导致 HTTP 400 错误。
 
----
-
-## 10. LLM 配置
-
-### 方式一：前端 BYOK 面板（推荐）
-
-打开浏览器 → 点击 "⚙️ 引擎配置" → 填入 Base URL / Model / API Key → 点击 "连接引擎"。配置自动保存到浏览器 localStorage，无需重启。
-
-### 方式二：后端环境变量（后备）
-
-系统通过环境变量解耦 LLM 提供商，支持 DeepSeek 官方 API 或任意兼容 OpenAI SDK 的 relay 中转站。
-
-#### 环境变量（[`.env`](backend/.env)）
-
-```ini
-LLM_API_KEY="sk-你的deepseek密钥"
-LLM_BASE_URL="https://api.deepseek.com"
-LLM_MODEL="deepseek-chat"
-```
-
-### 五模式调用（[`llm_client.py`](backend/app/llm_client.py)）
-
-所有 LLM 调用统一使用 **Markdown 剥离法（The Markdown Stripper）**：不传 `response_format`，让模型自然输出带 ` ```json ` 代码块的 markdown，后端通过 `extract_json_from_markdown()` 用正则 `re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)` 提取 JSON 并解析。彻底规避 DeepSeek `json_object` 模式下的 Constrained Decoder 对齐税问题。
-
-| 模式 | 函数 | temperature | 用途 |
-|------|------|-------------|------|
-| 流式生成 | `stream_generate(system_prompt)` | 0.85 | Phase 4 剧情渲染，逐 chunk 推送 SSE |
-| 事实抽取 | `extract_new_facts(text)` | 0.3 | Phase 5 记忆沉淀，Markdown 剥离法 |
-| 记忆炼化 | `compact_old_facts(entity_name, entity_type, facts_list)` | 0.3 | Memory GC 后台压缩，Markdown 剥离法 |
-| 极速推演 | `suggest_plot_directions(recent_context)` | 0.8 | 幽灵卡片，3 个差异化剧情走向建议 |
-| 灵感裂变 | `generate_pitches_from_llm(seed_text, ...)` | 0.9 | PitchRoom 灵感发散，3 个变体 |
-| 大纲锻造 | `generate_outline_from_llm(pitch, ...)` | 0.85 | OutlineForge 大纲骨架生成 |
-
----
-
-### 错误分类与中文翻译
-
-系统所有 LLM API 错误和网络错误均翻译为中文，帮助用户快速区分"软件问题"与"AI/配置问题"。
-
-#### 后端 LLM 错误翻译（[`llm_client.py`](backend/app/llm_client.py:20)）
+**修复**：在 [`prompt_engine.py`](rag-memory-system/backend/app/prompt_engine.py) 中引入 `tiktoken` 计数 + 4 阶段动态裁剪：
 
 ```python
-_LLM_ERROR_MAP = {
-    401: "API Key 无效或已过期，请检查前端面板或 .env 中的配置",
-    402: "API 账户余额不足，请充值后重试",
-    403: "API 访问被拒绝，请检查密钥权限",
-    404: "请求的模型不存在或端点错误",
-    429: "API 请求频率过高，请稍后重试",
-    500: "LLM 服务端内部错误，请稍后重试",
-    502: "LLM 网关错误，请稍后重试",
-    503: "LLM 服务暂时不可用，请稍后重试",
-}
+MAX_PROMPT_TOKENS = 6000  # 安全阈值，低于常见 LLM 上下文窗口
+# 优先级：custom_prompt > current_scene > pitch > outline > rag_facts
 ```
 
-网络连接失败翻译为：`"无法连接到 LLM API，请检查网络连接或 API 地址配置"`
-API Key 未配置翻译为：`"API Key 未配置。请在前端面板设置，或在后端 .env 中配置 LLM_API_KEY"`
+**裁剪策略**：
+| 阶段 | 操作 | 条件 |
+|------|------|------|
+| 第一刀 | RAG facts 从 Top 15 砍到 Top 5 | token_count > 6000 |
+| 第二刀 | Outline 截断到 2000 tokens | 仍超阈值 |
+| 第三刀 | Pitch 截断到 1000 tokens | 仍超阈值 |
+| 第四刀 | RAG facts 终极砍到 Top 3 | 仍超阈值 |
 
-#### 前端网络错误翻译（[`stream.js`](frontend/src/api/stream.js:14)、[`storyStore.js`](frontend/src/stores/storyStore.js:4)）
-
-```javascript
-function friendlyFetchError(err) {
-  // "Failed to fetch" / "NetworkError" → "无法连接到服务器，请检查后端服务是否启动或网络连接是否正常"
-  // "AbortError" / "timeout" → "请求超时或被中断，请重试"
-}
-```
-
-#### 后端 502 兜底（[`books.py`](backend/app/routers/books.py:63)）
-
-当 LLM 返回空结果（静默失败）时，抛出 `HTTPException(502)`，前端 `fetchWithBYOK` 的 `res.ok` 检查捕获并显示：
-- `"LLM API 调用失败，请检查 API 配置、余额或网络连接"`（裂变/大纲）
-- `"HTTP 502: ..."`（通用）
-
-#### 责任划分速查表
-
-| 错误表现 | 根因 | 责任方 |
-|----------|------|--------|
-| `API Key 无效或已过期` | 密钥配置错误 | 用户配置 |
-| `API 账户余额不足` | 账户欠费 | 用户账户 |
-| `无法连接到 LLM API` | 网络不通或地址错误 | 用户网络/配置 |
-| `无法连接到服务器` | 后端未启动或端口错误 | 软件部署 |
-| `HTTP 502: LLM API 调用失败` | LLM 返回空结果 | LLM 服务 |
-| `HTTP 4xx/5xx` 原始错误 | 后端代码异常 | 软件 Bug |
-
-## 11. 样式架构
-
-### Tailwind CSS v4
-
-系统使用 Tailwind CSS v4 作为样式引擎，通过 PostCSS 插件 `@tailwindcss/postcss` 编译。
-
-#### 配置文件
-
-[`tailwind.config.js`](frontend/tailwind.config.js)：
-```javascript
-export default {
-  content: ["./index.html", "./src/**/*.{vue,js,ts,jsx,tsx}"],
-  theme: { extend: {} },
-  plugins: [],
-}
-```
-
-[`postcss.config.js`](frontend/postcss.config.js)：
-```javascript
-export default {
-  plugins: { '@tailwindcss/postcss': {}, autoprefixer: {} }
-}
-```
-
-#### 样式入口
-
-[`style.css`](frontend/src/style.css) 仅包含 Tailwind v4 入口 + 自定义工具类：
-
-```css
-@import "tailwindcss";
-
-.custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.custom-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.08); border-radius: 10px; }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.15); }
-.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-.scrollbar-hide::-webkit-scrollbar { display: none; }
-@keyframes fade-in-up { 0% { opacity: 0; transform: translateY(20px); } 100% { opacity: 1; transform: translateY(0); } }
-```
-
-所有 Vite 默认样式（`#app { max-width: 1280px; margin: 0 auto; text-align: center; }`）已删除，避免与 Tailwind 全屏布局冲突。
+**设计要点**：
+- `tiktoken` 初始化失败时静默降级（try/except），不阻塞生成
+- 裁剪顺序按优先级从低到高：先砍 RAG facts 数量（信息密度最低），再砍 outline 早期卷，最后砍 pitch
+- `current_scene` 和 `custom_prompt` 永不裁剪（最高优先级）
 
 ---
 
-## 12. 启动指南
+## 七、数据库外键约束现状
 
-### 前置条件
-- Docker & Docker Compose
-- Python 3.11+
-- Node.js 18+
-
-### 步骤
-
-```bash
-# 1. 启动 PostgreSQL + pgvector
-docker compose up -d
-
-# 2. 启动后端
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# 3. 启动前端
-cd frontend
-npm install
-npm run dev
-```
-
-### 首次使用
-
-1. 打开浏览器访问 `http://localhost:5173`
-2. 点击书架大厅右上角 **"⚙️ 引擎配置"**
-3. 填入你的 LLM Base URL、Model、API Key
-4. 点击 **"连接引擎"** — 配置自动保存
-5. 点击 **"+ 开辟新世界"** 开始创作
-
-### 验证
-
-```bash
-# 健康检查
-curl http://localhost:8000/health
-
-# 创建一本书
-curl -X POST http://localhost:8000/api/books/ \
-  -H "Content-Type: application/json" \
-  -d '{"title":"修仙传","summary":"一个少年的修仙之路"}'
-
-# 提交一条记忆（需替换 book_id）
-curl -X POST http://localhost:8000/api/memory/commit \
-  -H "Content-Type: application/json" \
-  -d '{"book_id":"<上一步返回的id>","chapter_marker":1,"entry_name":"张三","triggers":["张三","三哥"],"content":"青云宗外门弟子","type":"人物"}'
-
-# 召回记忆
-curl -X POST http://localhost:8000/api/memory/fetch \
-  -H "Content-Type: application/json" \
-  -d '{"book_id":"<book_id>","current_chapter":1,"extracted_triggers":["张三","青云城"]}'
-
-# SSE 流式生成（需保持连接查看流式输出）
-curl -N -X POST http://localhost:8000/api/stream/generate \
-  -H "Content-Type: application/json" \
-  -d '{"book_id":"<book_id>","chapter_marker":1,"plot_context":"张三拔剑","extracted_triggers":["张三"]}'
-
-# 时间线覆写（需替换 book_id 和 chapter_number）
-curl -X POST http://localhost:8000/api/memory/<book_id>/rebuild/5 \
-  -H "Content-Type: application/json" \
-  -d '{"text":"修改后的章节全文..."}'
-```
+| 父表 | 子表 | 外键约束 | 级联删除 |
+|------|------|---------|---------|
+| `books` | `story_pitches` | ✅ `book_id` → `books.id` | ✅ CASCADE |
+| `books` | `memory_entities` | ✅ `book_id` → `books.id` | ✅ CASCADE |
+| `books` | `memory_facts` | ✅ `book_id` → `books.id` | ✅ CASCADE |
+| `books` | `story_chapters` | ✅ `fk_chapter_book`（v3 新增） | ✅ CASCADE |
+| `books` | `story_chat_messages` | ✅ `fk_chat_book`（v3 新增） | ✅ CASCADE |
+| `story_pitches` | `story_outline_nodes` | ✅ `fk_outline_pitch`（v3 新增） | ✅ CASCADE |
 
 ---
 
-## 13. Zen Mode UI Refactoring（降噪柔化）
+## 八、修复记录
 
-### 设计动机
-
-原始 UI 存在三个视觉侵略性问题：
-1. **对比度天花板**：纯白背景 + 纯黑文字（`#000000`）导致长时间创作时眼部疲劳
-2. **视觉层级扁平**：所有元素使用相同色阶，缺乏视觉呼吸感
-3. **控制台侵略性**：状态提示使用高饱和色块，干扰创作沉浸感
-
-### Strike 1：降低对比度天花板
-
-| 元素 | 修改前 | 修改后 | 效果 |
-|------|--------|--------|------|
-| 主背景 | `bg-gray-900`（`#111827`） | `bg-[#0f0f12]` | 更深的墨色基底，减少蓝光 |
-| 面板背景 | `bg-gray-800`（`#1f2937`） | `bg-[#1a1a20]` | 柔和的炭灰色，与主背景形成微妙层次 |
-| 主文字 | `text-white` / `text-gray-100` | `text-gray-200`（`#e5e7eb`） | 降低亮度，减少眩光 |
-| 次级文字 | `text-gray-300` | `text-gray-400`（`#9ca3af`） | 进一步退后，建立视觉层级 |
-| 输入框背景 | `bg-gray-700` | `bg-[#1e1e26]` | 与面板微差，暗示可交互性 |
-
-### Strike 2：视觉层级后退
-
-通过 `z-index` 层级管理和 `opacity` 透明度梯度，建立清晰的视觉呼吸感：
-
-```
-顶层（z-40+）：模态框、气泡提示
-中层（z-10）：面板容器、按钮
-底层（z-0）：主背景
-```
-
-关键改动：
-- 顶栏从 `z-30` 降至 `z-10`，不再悬浮于所有元素之上
-- 三栏面板使用 `border-[#2a2a32]` 替代 `border-gray-700`，边框更柔和
-- 按钮 hover 效果从 `brightness-110` 改为 `opacity-80`，过渡更平滑
-- 滚动条从 `rgba(255,255,255,0.08)` 降至 `rgba(255,255,255,0.05)`，减少视觉干扰
-
-### Strike 3：降低控制台侵略性
-
-| 元素 | 修改前 | 修改后 |
-|------|--------|--------|
-| 状态步骤文字 | `text-green-400` / `text-blue-400` | `text-green-300/70` / `text-blue-300/70`（加 70% 透明度） |
-| 错误提示 | `text-red-500` + 红色背景 | `text-red-400/80` + 无背景色块 |
-| 骨架屏脉冲 | `bg-gray-600` 高亮 | `bg-[#2a2a32]` 柔光脉冲 |
-| 分隔线 | `border-gray-700` | `border-[#2a2a32]` |
-
-### 实现文件
-
-- [`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) — 三栏布局、顶栏、控制台、词条气泡全部降噪
-- [`style.css`](frontend/src/style.css) — 滚动条颜色调整
-- [`MemoryPanel.vue`](frontend/src/components/MemoryPanel.vue) — 面板背景色调整
-- [`MemoryExplorer.vue`](frontend/src/components/MemoryExplorer.vue) — 词条列表色阶调整
-
----
-
-## 14. Telemetry HUD（遥测仪表盘）
-
-### 设计动机
-
-作者在创作时需要实时感知"写了多少"和"进度如何"，但传统字数统计要么藏在菜单深处，要么以数字形式粗暴展示，破坏沉浸感。Telemetry HUD 采用**水印级**设计——信息存在但不打扰。
-
-### 设计哲学：水印级（Watermark-Level）
-
-- **不占空间**：固定在右下角，不干扰三栏布局
-- **不抢注意力**：使用 `text-gray-500/40`（40% 透明度），比次级文字更低一阶
-- **信息密度极低**：仅显示三个核心指标——当前章节字数 / 总字数 / 章节数
-- **自动更新**：随 `storyStore.viewingChapter.content` 变化自动重算
-
-### 字数计算引擎
-
-[`storyStore.js`](frontend/src/stores/storyStore.js:63) 新增两个 getter：
-
-```javascript
-getters: {
-  // 当前章节字数（纯中文 + 英文单词数）
-  currentChapterWordCount: (state) => {
-    const text = state.viewingChapter?.content || ''
-    const cn = (text.match(/[\u4e00-\u9fff]/g) || []).length
-    const en = (text.match(/[a-zA-Z]+/g) || []).length
-    return cn + en
-  },
-  // 全书总字数（所有章节累加）
-  totalWordCount: (state) => {
-    return (state.chapters || []).reduce((sum, ch) => {
-      const text = ch.content || ''
-      const cn = (text.match(/[\u4e00-\u9fff]/g) || []).length
-      const en = (text.match(/[a-zA-Z]+/g) || []).length
-      return sum + cn + en
-    }, 0)
-  }
-}
-```
-
-### HUD 渲染
-
-[`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) 右下角固定定位：
-
-```html
-<div class="fixed bottom-3 right-4 z-10 text-xs text-gray-500/40 select-none pointer-events-none leading-relaxed text-right">
-  <div>本卷 {{ storyStore.currentChapterWordCount }} 字</div>
-  <div>全书 {{ storyStore.totalWordCount }} 字</div>
-  <div>{{ storyStore.chapters.length }} 章</div>
-</div>
-```
-
-**关键设计决策**：
-- `pointer-events-none` — 鼠标穿透，不阻挡下方交互
-- `select-none` — 防止误选中
-- `text-right` — 右对齐，与右下角定位一致
-- `leading-relaxed` — 行间距舒适，不拥挤
-- 三行垂直排列，信息一目了然
-
-### 实现文件
-
-- [`storyStore.js`](frontend/src/stores/storyStore.js:63) — `currentChapterWordCount` + `totalWordCount` getters
-- [`IDEWorkspace.vue`](frontend/src/views/IDEWorkspace.vue) — 右下角 HUD 渲染
+> 见 [`CHANGELOG.md`](rag-memory-system/CHANGELOG.md)（如存在）或 Git 提交历史。
