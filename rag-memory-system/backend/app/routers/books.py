@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
-import uuid
 
 from app.database import get_db
 from app.models.book import Book
@@ -34,11 +33,7 @@ async def list_books(db: AsyncSession = Depends(get_db)):
 @router.get("/{book_id}")
 async def get_book(book_id: str, db: AsyncSession = Depends(get_db)):
     """获取单本书详情（含文风约束）"""
-    try:
-        bid = uuid.UUID(book_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid book ID")
-    result = await db.execute(select(Book).where(Book.id == bid))
+    result = await db.execute(select(Book).where(Book.id == book_id))
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
@@ -57,12 +52,8 @@ class CustomPromptUpdate(BaseModel):
 
 @router.put("/{book_id}/custom_prompt")
 async def update_custom_prompt(book_id: str, req: CustomPromptUpdate, db: AsyncSession = Depends(get_db)):
-    """💡 持久化书籍专属文风约束到 PostgreSQL"""
-    try:
-        bid = uuid.UUID(book_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid book ID")
-    result = await db.execute(select(Book).where(Book.id == bid))
+    """💡 持久化书籍专属文风约束"""
+    result = await db.execute(select(Book).where(Book.id == book_id))
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
@@ -86,8 +77,7 @@ async def create_book(req: CreateBookRequest, db: AsyncSession = Depends(get_db)
     # 💡 认亲手术：将孤儿 Pitch 绑定到新创建的 Book
     if req.pitch_id:
         try:
-            pitch_uuid = uuid.UUID(str(req.pitch_id))
-            pitch = await db.get(StoryPitch, pitch_uuid)
+            pitch = await db.get(StoryPitch, str(req.pitch_id))
             if pitch:
                 pitch.book_id = book.id
                 print(f"[认亲手术] Pitch {pitch.id} 的 book_id 已绑定为 {book.id}")
@@ -157,17 +147,13 @@ async def api_generate_pitches(req: PitchRequest, request: Request, db: AsyncSes
     for p in pitches:
         variant_of = None
         if req.is_variant and req.target_pitch and "id" in req.target_pitch:
-            try:
-                variant_of = uuid.UUID(str(req.target_pitch["id"]))
-            except ValueError:
-                pass
+            variant_of = str(req.target_pitch["id"])
 
         # 💡 契约修复：始终持久化 Pitch，即使尚无 book_id
         # 首次创建 Pitch 时 book_id 为 NULL，后续 create_book 会回写
         try:
-            book_id_uuid = uuid.UUID(req.book_id) if req.book_id else None
             pitch = StoryPitch(
-                book_id=book_id_uuid,
+                book_id=str(req.book_id) if req.book_id else None,
                 seed_text=req.seed_text,
                 variant_of=variant_of,
                 title=p.get("title", ""),
@@ -216,10 +202,7 @@ async def api_generate_outline(req: OutlineGenRequest, request: Request, db: Asy
 
     pitch_id = None
     if "id" in req.pitch and req.pitch["id"]:
-        try:
-            pitch_id = uuid.UUID(str(req.pitch["id"]))
-        except ValueError:
-            pass
+        pitch_id = str(req.pitch["id"])
 
     # 💡 防御性兜底：如果 pitch_id 仍为空，按 title 查找已持久化的 Pitch
     if not pitch_id:
@@ -274,30 +257,25 @@ async def api_generate_outline(req: OutlineGenRequest, request: Request, db: Asy
 @router.delete("/{book_id}")
 async def delete_book(book_id: str, db: AsyncSession = Depends(get_db)):
     """删除一本书及其所有关联数据"""
-    try:
-        bid = uuid.UUID(book_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid book ID")
-
-    result = await db.execute(select(Book).where(Book.id == bid))
+    result = await db.execute(select(Book).where(Book.id == book_id))
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
     # 1. 删除该 book 下所有 pitch 关联的 outline 节点
     pitch_ids = await db.execute(
-        select(StoryPitch.id).where(StoryPitch.book_id == bid)
+        select(StoryPitch.id).where(StoryPitch.book_id == book_id)
     )
     for (pid,) in pitch_ids:
         await db.execute(delete(StoryOutlineNode).where(StoryOutlineNode.pitch_id == pid))
     # 2. 删除该 book 下所有 pitch
-    await db.execute(delete(StoryPitch).where(StoryPitch.book_id == bid))
+    await db.execute(delete(StoryPitch).where(StoryPitch.book_id == book_id))
     # 3. 删除 chapters（无外键约束，需手动）
-    await db.execute(delete(StoryChapter).where(StoryChapter.book_id == bid))
+    await db.execute(delete(StoryChapter).where(StoryChapter.book_id == book_id))
     # 4. 删除 chat messages（无外键约束，需手动）
-    await db.execute(delete(StoryChatMessage).where(StoryChatMessage.book_id == bid))
+    await db.execute(delete(StoryChatMessage).where(StoryChatMessage.book_id == book_id))
     # 5. 删除 book（entity / fact 由数据库级联删除）
-    await db.execute(delete(Book).where(Book.id == bid))
+    await db.execute(delete(Book).where(Book.id == book_id))
     await db.commit()
 
     return {"status": "success", "message": f"Book {book_id} deleted"}

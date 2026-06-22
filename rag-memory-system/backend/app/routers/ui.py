@@ -1,3 +1,4 @@
+import json
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -17,7 +18,7 @@ def list_entities(book_id: str = Query(...), db: Session = Depends(get_db)):
         "id": str(e.id),
         "entry_name": e.entry_name,
         "type": e.type,
-        "triggers": e.triggers
+        "triggers": json.loads(e.triggers) if isinstance(e.triggers, str) else (e.triggers or [])
     } for e in entities]
 
 

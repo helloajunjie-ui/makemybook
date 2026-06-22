@@ -2,7 +2,6 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import uuid
 
 from app.database import get_db
 from app.models.pitch import StoryPitch
@@ -14,9 +13,9 @@ router = APIRouter(prefix="/api/pitch", tags=["pitch"])
 @router.post("/create", response_model=PitchResponse)
 async def create_pitch(req: PitchCreate, db: AsyncSession = Depends(get_db)):
     pitch = StoryPitch(
-        book_id=uuid.UUID(req.book_id) if req.book_id else None,
+        book_id=str(req.book_id) if req.book_id else None,
         seed_text=req.seed_text,
-        variant_of=uuid.UUID(req.variant_of) if req.variant_of else None,
+        variant_of=str(req.variant_of) if req.variant_of else None,
         title=req.title,
         summary=req.summary,
         tone=req.tone

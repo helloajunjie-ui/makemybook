@@ -1,10 +1,10 @@
+import json
+import math
 from fastapi import APIRouter, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, delete
-from sqlalchemy import Float
+from sqlalchemy import select, delete
 from collections import defaultdict
-import uuid
 
 from app.database import get_db
 from app.models import MemoryEntity, MemoryFact
@@ -20,96 +20,61 @@ class RebuildMemoryRequest(BaseModel):
     text: str
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """计算两个向量的余弦相似度"""
+    if not a or not b:
+        return 0.0
+    dot = sum(ai * bi for ai, bi in zip(a, b))
+    norm_a = math.sqrt(sum(ai * ai for ai in a))
+    norm_b = math.sqrt(sum(bi * bi for bi in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _parse_triggers(triggers_raw) -> list:
+    """将 triggers 从 Text(JSON) 解析为 list"""
+    if isinstance(triggers_raw, list):
+        return triggers_raw
+    if isinstance(triggers_raw, str):
+        try:
+            return json.loads(triggers_raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return []
+
+
+def _parse_embedding(embedding_raw) -> list[float] | None:
+    """将 embedding 从 Text(JSON) 解析为 list[float]"""
+    if isinstance(embedding_raw, list):
+        return embedding_raw
+    if isinstance(embedding_raw, str):
+        try:
+            return json.loads(embedding_raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
 @router.post("/fetch", response_model=FetchResponse)
 async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends(get_db)):
     """
-    💡 RAG v2 混合检索：
-    1. 如果 query_text 非空 → 计算 embedding → cosine_distance 向量检索（Top 15）
-    2. 如果 query_text 为空但有 extracted_triggers → 传统 triggers && 数组重叠
+    💡 单机化 RAG 检索：Numpy 内存余弦相似度
+    1. 如果 query_text 非空 → 计算 embedding → 内存中计算余弦相似度 → Top 15
+    2. 如果 query_text 为空但有 extracted_triggers → triggers JSON 包含匹配
     3. 两者都为空 → 返回本书全量活跃实体
     """
     query_text = request.query_text.strip() if request.query_text else ""
     extracted = request.extracted_triggers
 
-    # ── 路径 A：向量检索（RAG v2 主路径）──
-    if query_text:
-        # 计算 query embedding
-        query_embedding = await compute_embedding(query_text)
-        if query_embedding:
-            # pgvector cosine_distance 语义搜索
-            stmt = text("""
-                SELECT me.id, me.entry_name, me.type, me.triggers,
-                       mf.id, mf.content, mf.chapter_marker,
-                       mf.embedding <=> :query_vec AS distance
-                FROM memory_entities me
-                JOIN memory_facts mf ON mf.entity_id = me.id
-                WHERE me.book_id = CAST(:book_id AS uuid)
-                  AND mf.chapter_marker <= :chapter
-                  AND mf.is_active = 1
-                  AND mf.embedding IS NOT NULL
-                ORDER BY distance ASC
-                LIMIT 15
-            """)
-            stmt = stmt.bindparams(
-                book_id=str(request.book_id),
-                chapter=request.current_chapter,
-                query_vec=query_embedding
-            )
-        else:
-            # Embedding API 失败，降级到全量返回
-            stmt = text("""
-                SELECT me.id, me.entry_name, me.type, me.triggers,
-                       mf.id, mf.content, mf.chapter_marker,
-                       0.0 AS distance
-                FROM memory_entities me
-                JOIN memory_facts mf ON mf.entity_id = me.id
-                WHERE me.book_id = CAST(:book_id AS uuid)
-                  AND mf.chapter_marker <= :chapter
-                  AND mf.is_active = 1
-                ORDER BY me.id, mf.chapter_marker ASC
-            """)
-            stmt = stmt.bindparams(
-                book_id=str(request.book_id),
-                chapter=request.current_chapter
-            )
-
-    # ── 路径 B：triggers 数组重叠（旧版兼容）──
-    elif extracted:
-        stmt = text("""
-            SELECT me.id, me.entry_name, me.type, me.triggers,
-                   mf.id, mf.content, mf.chapter_marker,
-                   0.0 AS distance
-            FROM memory_entities me
-            JOIN memory_facts mf ON mf.entity_id = me.id
-            WHERE me.book_id = CAST(:book_id AS uuid)
-              AND me.triggers && :triggers
-              AND mf.chapter_marker <= :chapter
-              AND mf.is_active = 1
-            ORDER BY me.id, mf.chapter_marker ASC
-        """)
-        stmt = stmt.bindparams(
-            book_id=str(request.book_id),
-            triggers=extracted,
-            chapter=request.current_chapter
-        )
-
-    # ── 路径 C：全量返回 ──
-    else:
-        stmt = text("""
-            SELECT me.id, me.entry_name, me.type, me.triggers,
-                   mf.id, mf.content, mf.chapter_marker,
-                   0.0 AS distance
-            FROM memory_entities me
-            JOIN memory_facts mf ON mf.entity_id = me.id
-            WHERE me.book_id = CAST(:book_id AS uuid)
-              AND mf.chapter_marker <= :chapter
-              AND mf.is_active = 1
-            ORDER BY me.id, mf.chapter_marker ASC
-        """)
-        stmt = stmt.bindparams(
-            book_id=str(request.book_id),
-            chapter=request.current_chapter
-        )
+    # ── 查出该书所有活跃的 MemoryFact + Entity ──
+    stmt = select(MemoryEntity, MemoryFact).join(
+        MemoryFact, MemoryFact.entity_id == MemoryEntity.id
+    ).where(
+        MemoryEntity.book_id == request.book_id,
+        MemoryFact.chapter_marker <= request.current_chapter,
+        MemoryFact.is_active == 1
+    ).order_by(MemoryEntity.id, MemoryFact.chapter_marker.asc())
 
     result = await db.execute(stmt)
     rows = result.all()
@@ -117,25 +82,94 @@ async def predict_fetch_memory(request: FetchRequest, db: AsyncSession = Depends
     entity_map = {}
     found_triggers_set = set()
 
-    for row in rows:
-        me_id, me_name, me_type, me_triggers, mf_id, mf_content, mf_chapter, _distance = row
+    # ── 路径 A：向量检索（主路径）──
+    if query_text:
+        query_embedding = await compute_embedding(query_text)
+        if query_embedding:
+            # 内存中计算余弦相似度
+            scored = []
+            for entity, fact in rows:
+                fact_emb = _parse_embedding(fact.embedding)
+                if fact_emb:
+                    score = _cosine_similarity(query_embedding, fact_emb)
+                    scored.append((score, entity, fact))
 
-        # triggers 重叠匹配（仅用于 missing_entries 统计）
-        if extracted:
+            # 按相似度降序排列，取 Top 15
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_rows = scored[:15]
+
+            for score, entity, fact in top_rows:
+                me_triggers = _parse_triggers(entity.triggers)
+                if extracted:
+                    for t in extracted:
+                        if t in me_triggers:
+                            found_triggers_set.add(t)
+
+                if entity.id not in entity_map:
+                    entity_map[entity.id] = {
+                        "entry_name": entity.entry_name,
+                        "type": entity.type,
+                        "triggers": me_triggers,
+                        "facts": []
+                    }
+                entity_map[entity.id]["facts"].append(
+                    FactItem(fact_id=str(fact.id), content=fact.content, chapter_marker=fact.chapter_marker)
+                )
+        else:
+            # Embedding API 失败，降级到全量返回
+            for entity, fact in rows:
+                me_triggers = _parse_triggers(entity.triggers)
+                if extracted:
+                    for t in extracted:
+                        if t in me_triggers:
+                            found_triggers_set.add(t)
+                if entity.id not in entity_map:
+                    entity_map[entity.id] = {
+                        "entry_name": entity.entry_name,
+                        "type": entity.type,
+                        "triggers": me_triggers,
+                        "facts": []
+                    }
+                entity_map[entity.id]["facts"].append(
+                    FactItem(fact_id=str(fact.id), content=fact.content, chapter_marker=fact.chapter_marker)
+                )
+
+    # ── 路径 B：triggers 包含匹配（旧版兼容）──
+    elif extracted:
+        for entity, fact in rows:
+            me_triggers = _parse_triggers(entity.triggers)
+            # 检查是否有任何 extracted trigger 在实体 triggers 中
+            matched = any(t in me_triggers for t in extracted)
+            if not matched:
+                continue
             for t in extracted:
-                if t in (me_triggers or []):
+                if t in me_triggers:
                     found_triggers_set.add(t)
+            if entity.id not in entity_map:
+                entity_map[entity.id] = {
+                    "entry_name": entity.entry_name,
+                    "type": entity.type,
+                    "triggers": me_triggers,
+                    "facts": []
+                }
+            entity_map[entity.id]["facts"].append(
+                FactItem(fact_id=str(fact.id), content=fact.content, chapter_marker=fact.chapter_marker)
+            )
 
-        if me_id not in entity_map:
-            entity_map[me_id] = {
-                "entry_name": me_name,
-                "type": me_type,
-                "triggers": me_triggers or [],
-                "facts": []
-            }
-        entity_map[me_id]["facts"].append(
-            FactItem(fact_id=str(mf_id), content=mf_content, chapter_marker=mf_chapter)
-        )
+    # ── 路径 C：全量返回 ──
+    else:
+        for entity, fact in rows:
+            me_triggers = _parse_triggers(entity.triggers)
+            if entity.id not in entity_map:
+                entity_map[entity.id] = {
+                    "entry_name": entity.entry_name,
+                    "type": entity.type,
+                    "triggers": me_triggers,
+                    "facts": []
+                }
+            entity_map[entity.id]["facts"].append(
+                FactItem(fact_id=str(fact.id), content=fact.content, chapter_marker=fact.chapter_marker)
+            )
 
     found_entries = [EntityItem(**v) for v in entity_map.values()]
     missing_entries = list(set(extracted) - found_triggers_set) if extracted else []
@@ -162,7 +196,7 @@ async def commit_memory(req: CommitRequest, db: AsyncSession = Depends(get_db)):
                 book_id=req.book_id,
                 entry_name=req.entry_name,
                 type=req.type,
-                triggers=req.triggers
+                triggers=json.dumps(req.triggers, ensure_ascii=False)
             )
             db.add(entity)
             await db.flush()
@@ -224,7 +258,6 @@ async def rebuild_chapter_memory(
         await db.flush()
 
         # 💡 2. 清理幽灵实体：删除没有任何事实关联的孤立实体
-        # 查出该书中所有实体
         all_entities = await db.execute(
             select(MemoryEntity).where(MemoryEntity.book_id == book_id)
         )
@@ -237,7 +270,7 @@ async def rebuild_chapter_memory(
 
         await db.flush()
 
-        # 💡【P2-6 修复】透传 LLM 配置参数，防止后台静默重塑时认证失败
+        # 💡 透传 LLM 配置参数
         api_key = request.headers.get("X-LLM-API-Key")
         base_url = request.headers.get("X-LLM-Base-URL")
         model_name = request.headers.get("X-LLM-Model")
@@ -246,13 +279,12 @@ async def rebuild_chapter_memory(
             await db.commit()
             return {"status": "success", "message": "No new facts extracted."}
 
-        # 💡 4. 植入新记忆（复用 stream.py 的入库逻辑）
+        # 💡 4. 植入新记忆
         for item in extracted_entities:
             entry_name = item.get("entry_name", "")
             if not entry_name or len(entry_name) > 12:
                 continue
 
-            # 查找或创建实体
             result = await db.execute(
                 select(MemoryEntity).where(
                     MemoryEntity.book_id == book_id,
@@ -272,22 +304,21 @@ async def rebuild_chapter_memory(
                     book_id=book_id,
                     entry_name=entry_name,
                     type=item.get("type", "其他"),
-                    triggers=triggers
+                    triggers=json.dumps(triggers, ensure_ascii=False)
                 )
                 db.add(entity)
                 await db.flush()
 
-            # 💡 RAG v2：为新记忆生成 embedding 向量
+            # 💡 为新记忆生成 embedding 向量
             fact_content = item.get("content", "")
             fact_embedding = await compute_embedding(fact_content, api_key, base_url)
 
-            # 插入新的事实（标记为当前被修改的章节）
             new_fact = MemoryFact(
                 entity_id=entity.id,
                 book_id=book_id,
                 content=fact_content,
                 chapter_marker=chapter_number,
-                embedding=fact_embedding if fact_embedding else None
+                embedding=json.dumps(fact_embedding, ensure_ascii=False) if fact_embedding else None
             )
             db.add(new_fact)
 

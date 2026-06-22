@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+psycopg2://admin:password@localhost:5432/rag_memory"
+    database_url: str = "sqlite+aiosqlite:///./dream_engine.db"
     embedding_dim: int = 1536
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"

@@ -1,6 +1,5 @@
 import json
 import asyncio
-import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,13 +11,13 @@ from app.database import get_db
 from app.routers.memory import predict_fetch_memory
 from app.schemas.fetch import FetchRequest
 from app.prompt_engine import build_injection_prompt
-from app.llm_client import stream_generate, extract_new_facts, suggest_plot_directions, _translate_llm_error, compute_embedding
+from app.llm_client import stream_generate, extract_new_facts, consolidate_entity_profile, suggest_plot_directions, _translate_llm_error, compute_embedding
 from app.models.entity import MemoryEntity
 from app.models.fact import MemoryFact
 from app.models.pitch import StoryPitch
 from app.models.outline import StoryOutlineNode
 from app.models.book import Book
-from app.memory_compactor import run_compaction_task
+from app.models.chapter import StoryChapter
 
 router = APIRouter()
 
@@ -38,7 +37,7 @@ async def get_book_global_context(book_id: str, db: AsyncSession) -> dict:
     try:
         pitch_row = await db.execute(
             select(StoryPitch).where(
-                StoryPitch.book_id == uuid.UUID(book_id)
+                StoryPitch.book_id == book_id
             ).order_by(StoryPitch.created_at.desc()).limit(1)
         )
         pitch = pitch_row.scalar_one_or_none()
@@ -206,7 +205,7 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                             book_id=req.book_id,
                             entry_name=entry_name,
                             type=entity_type,
-                            triggers=triggers
+                            triggers=json.dumps(triggers, ensure_ascii=False)
                         )
                         db.add(entity)
                         await db.flush()
@@ -214,10 +213,10 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                         fact_embedding = await compute_embedding(new_content, api_key, base_url)
                         fact = MemoryFact(
                             entity_id=entity.id,
-                            book_id=uuid.UUID(req.book_id),
+                            book_id=req.book_id,
                             chapter_marker=req.chapter_marker,
                             content=new_content,
-                            embedding=fact_embedding if fact_embedding else None,
+                            embedding=json.dumps(fact_embedding, ensure_ascii=False) if fact_embedding else None,
                             is_active=1  # 新词条直接活跃
                         )
                         db.add(fact)
@@ -227,9 +226,9 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                     else:
                         # ── 已有实体：融合模式 ──
                         # 合并 triggers（去重）
-                        existing_triggers = set(entity.triggers or [])
+                        existing_triggers = set(json.loads(entity.triggers) if isinstance(entity.triggers, str) else (entity.triggers or []))
                         new_triggers = existing_triggers.union(set(triggers))
-                        entity.triggers = list(new_triggers)
+                        entity.triggers = json.dumps(list(new_triggers), ensure_ascii=False)
 
                         # 查找当前活跃的 is_active=1 词条
                         old_fact_result = await db.execute(
@@ -257,10 +256,10 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                         fact_embedding = await compute_embedding(merged_content, api_key, base_url)
                         fact = MemoryFact(
                             entity_id=entity.id,
-                            book_id=uuid.UUID(req.book_id),
+                            book_id=req.book_id,
                             chapter_marker=req.chapter_marker,
                             content=merged_content,
-                            embedding=fact_embedding if fact_embedding else None,
+                            embedding=json.dumps(fact_embedding, ensure_ascii=False) if fact_embedding else None,
                             is_active=1  # 新词条成为活跃词条
                         )
                         db.add(fact)
@@ -295,13 +294,13 @@ async def stream_generation(req: StreamGenRequest, request: Request, db: AsyncSe
                     # 检查是否已有该章节（避免重复覆盖）
                     existing = await db.execute(
                         select(StoryChapter).where(
-                            StoryChapter.book_id == uuid.UUID(req.book_id),
+                            StoryChapter.book_id == req.book_id,
                             StoryChapter.chapter_marker == req.chapter_marker
                         ).limit(1)
                     )
                     if existing.scalar_one_or_none() is None:
                         draft_chapter = StoryChapter(
-                            book_id=uuid.UUID(req.book_id),
+                            book_id=req.book_id,
                             volume_number=0,  # volume=0 标记为草稿
                             chapter_marker=req.chapter_marker,
                             title=f"第{req.chapter_marker}章（断线草稿）",
@@ -432,18 +431,18 @@ async def stream_revision(
                             book_id=req.book_id,
                             entry_name=entry_name,
                             type=item.get("type", "其他"),
-                            triggers=triggers
+                            triggers=json.dumps(triggers, ensure_ascii=False)
                         )
                         db.add(entity)
                         await db.flush()
                     else:
-                        existing_triggers = set(entity.triggers or [])
+                        existing_triggers = set(json.loads(entity.triggers) if isinstance(entity.triggers, str) else (entity.triggers or []))
                         new_triggers = existing_triggers.union(set(triggers))
-                        entity.triggers = list(new_triggers)
+                        entity.triggers = json.dumps(list(new_triggers), ensure_ascii=False)
 
                     new_fact = MemoryFact(
                         entity_id=entity.id,
-                        book_id=uuid.UUID(req.book_id),
+                        book_id=req.book_id,
                         chapter_marker=req.chapter_marker,
                         content=content,
                         is_active=1
@@ -452,9 +451,6 @@ async def stream_revision(
                     affected_entity_ids.add(str(entity.id))
 
                 await db.commit()
-
-                for eid in affected_entity_ids:
-                    asyncio.create_task(run_compaction_task(eid, req.chapter_marker))
 
             except Exception as e:
                 await db.rollback()

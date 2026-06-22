@@ -1,5 +1,4 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, func, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 from app.database import Base
@@ -8,10 +7,10 @@ from app.database import Base
 class StoryPitch(Base):
     __tablename__ = "story_pitches"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    book_id = Column(UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True, index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    book_id = Column(String(36), ForeignKey("books.id", ondelete="CASCADE"), nullable=True, index=True)
     seed_text = Column(Text, nullable=False)
-    variant_of = Column(UUID(as_uuid=True), nullable=True, index=True)
+    variant_of = Column(String(36), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     summary = Column(Text, nullable=False)
     tone = Column(String(100), nullable=True)

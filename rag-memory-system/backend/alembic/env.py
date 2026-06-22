@@ -1,5 +1,3 @@
-import pgvector.sqlalchemy  # 必须引入，否则 Alembic 无法识别 Vector 类型
-
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context

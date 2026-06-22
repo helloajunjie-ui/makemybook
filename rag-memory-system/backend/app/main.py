@@ -11,9 +11,12 @@ if sys.stderr.encoding.lower() != 'utf-8':
     if hasattr(sys.stderr, 'reconfigure'):
         sys.stderr.reconfigure(encoding='utf-8')
 
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.database import async_engine, Base
 from app.models import MemoryEntity, MemoryFact, StoryPitch, StoryOutlineNode, Book, StoryChapter, StoryChatMessage, StoryApiConfig
@@ -50,3 +53,19 @@ app.include_router(settings.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# 💡 前后端同体：挂载前端静态文件
+#    - /assets/* 由 StaticFiles 直接服务（CSS/JS/图片等）
+#    - 其他非 API 路径返回 index.html（SPA 路由支持）
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "../../frontend/dist")
+app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """SPA fallback：非 API 路径返回前端 index.html"""
+    index_path = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return {"status": "ok", "message": "Frontend not built yet. Run: cd frontend && npm run build"}
